@@ -1,0 +1,536 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CNIC Lookup</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;600;800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:#0a0a0f;--surface:#111118;--card:#16161f;--border:#2a2a3a;
+    --green:#00ff88;--green-dim:#00cc6a;--green-glow:rgba(0,255,136,0.15);
+    --text:#e8e8f0;--muted:#6b6b80;--red:#ff4466;--yellow:#ffcc00;
+    --mono:'Space Mono',monospace;--sans:'Syne',sans-serif;
+  }
+  *{margin:0;padding:0;box-sizing:border-box;}
+  body{background:var(--bg);color:var(--text);font-family:var(--sans);min-height:100vh;overflow-x:hidden;}
+  body::before{content:'';position:fixed;inset:0;background-image:linear-gradient(rgba(0,255,136,0.03) 1px,transparent 1px),linear-gradient(90deg,rgba(0,255,136,0.03) 1px,transparent 1px);background-size:40px 40px;pointer-events:none;z-index:0;}
+  .wrapper{position:relative;z-index:1;max-width:680px;margin:0 auto;padding:40px 20px 80px;}
+  .header{text-align:center;margin-bottom:48px;}
+  .logo{display:inline-flex;align-items:center;gap:10px;margin-bottom:20px;}
+  .logo-icon{width:42px;height:42px;background:var(--green);border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:20px;}
+  .logo-text{font-family:var(--mono);font-size:22px;font-weight:700;color:var(--green);letter-spacing:2px;}
+  .tagline{font-size:13px;color:var(--muted);font-family:var(--mono);letter-spacing:1px;text-transform:uppercase;}
+  .stats-row{display:flex;gap:10px;margin-bottom:20px;}
+  .stat-pill{flex:1;background:var(--card);border:1px solid var(--border);border-radius:10px;padding:12px;text-align:center;}
+  .stat-val{font-family:var(--mono);font-size:20px;font-weight:700;color:var(--green);}
+  .stat-label{font-size:11px;color:var(--muted);margin-top:2px;}
+  .status-bar{display:flex;align-items:center;gap:8px;padding:10px 16px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:20px;font-family:var(--mono);font-size:12px;color:var(--muted);}
+  .status-dot{width:8px;height:8px;border-radius:50%;background:var(--green);animation:pulse 2s infinite;flex-shrink:0;}
+  @keyframes pulse{0%,100%{opacity:1;}50%{opacity:0.3;}}
+  .search-card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:28px;margin-bottom:24px;position:relative;overflow:hidden;}
+  .search-card::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--green),transparent);}
+  .search-label{font-family:var(--mono);font-size:11px;color:var(--green);letter-spacing:2px;text-transform:uppercase;margin-bottom:12px;display:block;}
+  .input-row{display:flex;gap:10px;}
+  .search-input{flex:1;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px 18px;font-family:var(--mono);font-size:16px;color:var(--text);outline:none;transition:all 0.2s;letter-spacing:2px;}
+  .search-input::placeholder{color:var(--muted);letter-spacing:1px;font-size:14px;}
+  .search-input:focus{border-color:var(--green);box-shadow:0 0 0 3px var(--green-glow);}
+  .search-input.valid{border-color:var(--green);}
+  .search-input.invalid{border-color:var(--red);}
+  .search-btn{background:var(--green);color:#000;border:none;border-radius:10px;padding:14px 24px;font-family:var(--mono);font-size:14px;font-weight:700;cursor:pointer;transition:all 0.2s;white-space:nowrap;display:flex;align-items:center;gap:8px;}
+  .search-btn:hover{background:var(--green-dim);transform:translateY(-1px);box-shadow:0 4px 20px var(--green-glow);}
+  .search-btn:disabled{opacity:0.5;cursor:not-allowed;transform:none;}
+  .hint{font-size:12px;color:var(--muted);font-family:var(--mono);margin-top:10px;}
+  .rate-warning{background:rgba(255,204,0,0.08);border:1px solid rgba(255,204,0,0.3);border-radius:10px;padding:12px 16px;font-family:var(--mono);font-size:12px;color:var(--yellow);margin-top:12px;display:none;}
+  .loader{display:none;text-align:center;padding:40px;}
+  .loader.active{display:block;}
+  .loader-ring{width:48px;height:48px;border:3px solid var(--border);border-top-color:var(--green);border-radius:50%;animation:spin 0.8s linear infinite;margin:0 auto 16px;}
+  @keyframes spin{to{transform:rotate(360deg);}}
+  .loader-text{font-family:var(--mono);font-size:13px;color:var(--green);letter-spacing:2px;}
+  #results{animation:fadeUp 0.4s ease;}
+  @keyframes fadeUp{from{opacity:0;transform:translateY(16px);}to{opacity:1;transform:translateY(0);}}
+  .result-card{background:var(--card);border:1px solid var(--border);border-radius:16px;overflow:hidden;margin-bottom:16px;}
+  .result-header{padding:16px 20px;background:var(--surface);border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;}
+  .result-title{font-family:var(--mono);font-size:12px;color:var(--green);letter-spacing:2px;text-transform:uppercase;}
+  .result-badge{background:var(--green-glow);border:1px solid var(--green);color:var(--green);font-family:var(--mono);font-size:11px;padding:3px 10px;border-radius:20px;}
+  .record-block{padding:20px;border-bottom:1px solid var(--border);}
+  .record-block:last-child{border-bottom:none;}
+  .record-num{font-family:var(--mono);font-size:10px;color:var(--muted);letter-spacing:2px;text-transform:uppercase;margin-bottom:14px;}
+  .field-row{display:flex;align-items:flex-start;gap:12px;padding:10px 0;border-bottom:1px solid rgba(255,255,255,0.04);}
+  .field-row:last-child{border-bottom:none;}
+  .field-icon{font-size:16px;flex-shrink:0;margin-top:1px;width:22px;text-align:center;}
+  .field-key{font-family:var(--mono);font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:1px;min-width:90px;flex-shrink:0;padding-top:2px;}
+  .field-val{font-family:var(--mono);font-size:14px;color:var(--text);word-break:break-all;flex:1;display:flex;align-items:center;gap:8px;}
+  .copy-btn{background:none;border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:2px 7px;font-size:10px;cursor:pointer;font-family:var(--mono);transition:all 0.15s;flex-shrink:0;}
+  .copy-btn:hover{border-color:var(--green);color:var(--green);}
+  .msg-box{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:32px 24px;text-align:center;}
+  .msg-icon{font-size:40px;margin-bottom:12px;}
+  .msg-title{font-size:18px;font-weight:800;margin-bottom:8px;}
+  .msg-sub{font-family:var(--mono);font-size:12px;color:var(--muted);}
+  .msg-box.error{border-color:rgba(255,68,102,0.3);}
+  .msg-box.error .msg-title{color:var(--red);}
+  .history-section{margin-top:32px;}
+  .section-label{font-family:var(--mono);font-size:11px;color:var(--muted);letter-spacing:2px;text-transform:uppercase;margin-bottom:12px;}
+  .history-item{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:var(--card);border:1px solid var(--border);border-radius:8px;margin-bottom:6px;cursor:pointer;transition:all 0.15s;}
+  .history-item:hover{border-color:var(--green);}
+  .history-num{font-family:var(--mono);font-size:13px;letter-spacing:1px;}
+  .history-time{font-family:var(--mono);font-size:11px;color:var(--muted);}
+  .toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%) translateY(80px);background:var(--green);color:#000;font-family:var(--mono);font-size:13px;font-weight:700;padding:12px 24px;border-radius:30px;transition:transform 0.3s ease;z-index:999;white-space:nowrap;}
+  .toast.show{transform:translateX(-50%) translateY(0);}
+  @media(max-width:480px){.input-row{flex-direction:column;}.search-btn{width:100%;justify-content:center;}.stats-row{gap:6px;}.field-key{min-width:70px;}}
+</style>
+</head>
+<body>
+<div class="wrapper">
+  <div class="header">
+    <div class="logo">
+      <div class="logo-icon">🔍</div>
+      <span class="logo-text">CNIC.LOOKUP</span>
+    </div>
+    <p class="tagline">Pakistan SIM &amp; CNIC Tracker</p>
+  </div>
+
+  <div class="stats-row">
+    <div class="stat-pill">
+      <div class="stat-val" id="totalSearches">0</div>
+      <div class="stat-label">Searches</div>
+    </div>
+    <div class="stat-pill">
+      <div class="stat-val" id="remainingSearches">--</div>
+      <div class="stat-label">Remaining</div>
+    </div>
+    <div class="stat-pill">
+      <div class="stat-val" id="totalFound">0</div>
+      <div class="stat-label">Records Found</div>
+    </div>
+  </div>
+
+  <div class="status-bar">
+    <div class="status-dot"></div>
+    <span id="statusText">Initializing...</span>
+  </div>
+
+  <div class="search-card">
+    <span class="search-label">// Search Database</span>
+    <div class="input-row">
+      <input type="tel" id="searchInput" class="search-input"
+        placeholder="03001234567 or CNIC..."
+        maxlength="13" autocomplete="off" inputmode="numeric">
+      <button class="search-btn" id="searchBtn" onclick="doSearch()">
+        <span id="btnIcon">⚡</span>
+        <span id="btnText">Search</span>
+      </button>
+    </div>
+    <p class="hint">// Enter 10–13 digit SIM or CNIC number</p>
+    <div class="rate-warning" id="rateWarning">
+      ⚠ Rate limit reached. Resets in <span id="resetTime">--</span> minutes.
+    </div>
+  </div>
+
+  <div class="loader" id="loader">
+    <div class="loader-ring"></div>
+    <p class="loader-text">// QUERYING DATABASE...</p>
+  </div>
+
+  <div id="results"></div>
+
+  <div class="history-section" id="historySection" style="display:none">
+    <p class="section-label">// Recent Searches</p>
+    <div id="historyList"></div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+// ============================================================
+// Device Fingerprinting
+// Collects stable browser signals that survive IP changes,
+// incognito mode, and clearing cookies/localStorage
+// ============================================================
+async function getDeviceFingerprint() {
+  const signals = []
+
+  // 1. Screen resolution + color depth
+  signals.push(`${screen.width}x${screen.height}x${screen.colorDepth}`)
+
+  // 2. Timezone
+  signals.push(Intl.DateTimeFormat().resolvedOptions().timeZone)
+
+  // 3. Language
+  signals.push(navigator.language + navigator.languages?.join(','))
+
+  // 4. Platform
+  signals.push(navigator.platform || '')
+
+  // 5. Hardware concurrency (CPU cores)
+  signals.push(navigator.hardwareConcurrency || 0)
+
+  // 6. Device memory
+  signals.push(navigator.deviceMemory || 0)
+
+  // 7. Touch points
+  signals.push(navigator.maxTouchPoints || 0)
+
+  // 8. User agent (stripped of version numbers for stability)
+  const ua = navigator.userAgent.replace(/[\d.]+/g, '')
+  signals.push(ua)
+
+  // 9. Canvas fingerprint — unique per device GPU/driver
+  try {
+    const canvas = document.createElement('canvas')
+    const ctx = canvas.getContext('2d')
+    ctx.textBaseline = 'top'
+    ctx.font = '14px Arial'
+    ctx.fillStyle = '#f60'
+    ctx.fillRect(125, 1, 62, 20)
+    ctx.fillStyle = '#069'
+    ctx.fillText('CNIC.lookup🔍', 2, 15)
+    ctx.fillStyle = 'rgba(102,204,0,0.7)'
+    ctx.fillText('CNIC.lookup🔍', 4, 17)
+    signals.push(canvas.toDataURL().slice(-50))
+  } catch { signals.push('no-canvas') }
+
+  // 10. WebGL renderer — unique per GPU
+  try {
+    const gl = document.createElement('canvas').getContext('webgl')
+    const ext = gl?.getExtension('WEBGL_debug_renderer_info')
+    if (ext) {
+      signals.push(gl.getParameter(ext.UNMASKED_RENDERER_WEBGL))
+      signals.push(gl.getParameter(ext.UNMASKED_VENDOR_WEBGL))
+    }
+  } catch { signals.push('no-webgl') }
+
+  // 11. Audio fingerprint
+  try {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext
+    if (AudioCtx) {
+      const ctx = new AudioCtx()
+      const osc = ctx.createOscillator()
+      const analyser = ctx.createAnalyser()
+      const gain = ctx.createGain()
+      gain.gain.value = 0
+      osc.connect(analyser)
+      analyser.connect(gain)
+      gain.connect(ctx.destination)
+      osc.start(0)
+      const data = new Float32Array(analyser.frequencyBinCount)
+      analyser.getFloatFrequencyData(data)
+      signals.push(data.slice(0, 10).join(','))
+      osc.stop()
+      ctx.close()
+    }
+  } catch { signals.push('no-audio') }
+
+  // 12. Installed fonts (check a few common ones)
+  const testFonts = ['Arial','Courier New','Georgia','Times New Roman','Verdana','Tahoma']
+  const canvas2 = document.createElement('canvas')
+  const ctx2 = canvas2.getContext('2d')
+  const baseFonts = ['monospace','sans-serif','serif']
+  const defaultWidths = {}
+  baseFonts.forEach(b => {
+    ctx2.font = `72px ${b}`
+    defaultWidths[b] = ctx2.measureText('mmmmm').width
+  })
+  const detected = testFonts.filter(font => {
+    return baseFonts.some(base => {
+      ctx2.font = `72px '${font}',${base}`
+      return ctx2.measureText('mmmmm').width !== defaultWidths[base]
+    })
+  })
+  signals.push(detected.join(','))
+
+  // Hash all signals together
+  const raw = signals.join('|||')
+  const encoder = new TextEncoder()
+  const data = encoder.encode(raw)
+  const hashBuffer = await crypto.subtle.digest('SHA-256', data)
+  const hashArray = Array.from(new Uint8Array(hashBuffer))
+  return hashArray.map(b => b.toString(16).padStart(2,'0')).join('').slice(0, 40)
+}
+
+// ============================================================
+// State
+// ============================================================
+let deviceFP = null
+let totalSearches = parseInt(localStorage.getItem('ts') || '0')
+let totalFound   = parseInt(localStorage.getItem('tf') || '0')
+
+document.getElementById('totalSearches').textContent = totalSearches
+document.getElementById('totalFound').textContent = totalFound
+
+// ============================================================
+// Load server status
+// ============================================================
+async function loadStatus() {
+  if (!deviceFP) return
+  try {
+    const r = await fetch('/api/status', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ deviceFingerprint: deviceFP })
+    })
+    const d = await r.json()
+    document.getElementById('remainingSearches').textContent = d.remaining
+    if (d.remaining === 0) {
+      document.getElementById('rateWarning').style.display = 'block'
+      document.getElementById('resetTime').textContent = d.reset_in
+    } else {
+      document.getElementById('rateWarning').style.display = 'none'
+    }
+    setStatus(`// Ready — ${d.remaining} searches remaining this hour`)
+  } catch {
+    setStatus('// Ready — could not load quota')
+  }
+}
+
+// ============================================================
+// Init fingerprint on load
+// ============================================================
+window.addEventListener('load', async () => {
+  setStatus('// Generating device fingerprint...')
+  try {
+    deviceFP = await getDeviceFingerprint()
+    console.log('FP:', deviceFP.slice(0,8) + '...')
+    await loadStatus()
+  } catch(e) {
+    setStatus('// Ready')
+    deviceFP = 'fallback-' + Math.random().toString(36).slice(2)
+  }
+  renderHistory()
+})
+
+// ============================================================
+// Input
+// ============================================================
+const inp = document.getElementById('searchInput')
+inp.addEventListener('input', function() {
+  this.value = this.value.replace(/\D/g,'').slice(0,13)
+  const l = this.value.length
+  this.className = 'search-input' + (l>=10&&l<=13?' valid':l>0?' invalid':'')
+})
+inp.addEventListener('keydown', e => { if(e.key==='Enter') doSearch() })
+
+// ============================================================
+// Toast
+// ============================================================
+function showToast(msg) {
+  const t = document.getElementById('toast')
+  t.textContent = msg
+  t.classList.add('show')
+  setTimeout(() => t.classList.remove('show'), 2500)
+}
+
+function setStatus(msg) {
+  document.getElementById('statusText').textContent = msg
+}
+
+function setBusy(busy) {
+  document.getElementById('searchBtn').disabled = busy
+  document.getElementById('btnIcon').textContent = busy ? '⏳' : '⚡'
+  document.getElementById('btnText').textContent = busy ? 'Searching' : 'Search'
+  document.getElementById('loader').className = busy ? 'loader active' : 'loader'
+}
+
+// ============================================================
+// History
+// ============================================================
+function getHistory() {
+  try { return JSON.parse(localStorage.getItem('history') || '[]') } catch { return [] }
+}
+function addHistory(number) {
+  let h = getHistory().filter(i => i.num !== number)
+  h.unshift({ num: number, time: Date.now() })
+  if (h.length > 5) h = h.slice(0, 5)
+  localStorage.setItem('history', JSON.stringify(h))
+  renderHistory()
+}
+function renderHistory() {
+  const h = getHistory()
+  const section = document.getElementById('historySection')
+  const list = document.getElementById('historyList')
+  if (!h.length) { section.style.display = 'none'; return }
+  section.style.display = 'block'
+  list.innerHTML = h.map(item => `
+    <div class="history-item" onclick="searchNumber('${item.num}')">
+      <span class="history-num">${item.num}</span>
+      <span class="history-time">${timeAgo(item.time)}</span>
+    </div>`).join('')
+}
+function timeAgo(ts) {
+  const d = Date.now() - ts
+  if(d<60000) return 'just now'
+  if(d<3600000) return Math.floor(d/60000)+'m ago'
+  if(d<86400000) return Math.floor(d/3600000)+'h ago'
+  return Math.floor(d/86400000)+'d ago'
+}
+
+// ============================================================
+// Render results
+// ============================================================
+function getEmoji(col) {
+  const c = col.toLowerCase()
+  if(c.includes('name'))    return '👤'
+  if(c.includes('number')||c.includes('mobile')) return '📱'
+  if(c.includes('cnic'))    return '🆔'
+  if(c.includes('address')) return '📍'
+  if(c.includes('network')||c.includes('operator')) return '📡'
+  return '▪️'
+}
+
+function renderResults(data, number) {
+  const records = data.records || {}
+  const error   = data.Error || records.Error
+  const div     = document.getElementById('results')
+
+  // Update remaining
+  if (data._remaining !== undefined) {
+    document.getElementById('remainingSearches').textContent = data._remaining
+    if (data._remaining === 0) {
+      document.getElementById('rateWarning').style.display = 'block'
+    }
+  }
+
+  if (error) {
+    if (data.rate_limited) {
+      div.innerHTML = `<div class="msg-box error">
+        <div class="msg-icon">⏳</div>
+        <div class="msg-title">Rate Limited</div>
+        <div class="msg-sub">${error}</div>
+      </div>`
+    } else {
+      div.innerHTML = `<div class="msg-box error">
+        <div class="msg-icon">⚠️</div>
+        <div class="msg-title">${error}</div>
+        <div class="msg-sub">// No record found for ${number}</div>
+      </div>`
+    }
+    updateStats(0)
+    return
+  }
+
+  if (records.PaidGate) {
+    const rows = records.Rows || []
+    const names = rows.map(r => `<div class="field-row">
+      <span class="field-icon">👤</span>
+      <span class="field-key">NAME</span>
+      <span class="field-val">${r.Name||'Hidden'}</span>
+    </div>`).join('')
+    div.innerHTML = `<div class="msg-box">
+      <div class="msg-icon">🔒</div>
+      <div class="msg-title" style="color:var(--yellow)">Paid Record</div>
+      <div class="msg-sub" style="margin-bottom:16px">// Full details require payment</div>
+      ${names}
+    </div>`
+    updateStats(rows.length)
+    return
+  }
+
+  const rows    = records.Rows || []
+  const columns = records.Columns || []
+
+  if (!rows.length) {
+    div.innerHTML = `<div class="msg-box">
+      <div class="msg-icon">🔍</div>
+      <div class="msg-title" style="color:var(--muted)">Not Found</div>
+      <div class="msg-sub">// ${number} not in free database</div>
+    </div>`
+    updateStats(0)
+    return
+  }
+
+  const recordsHtml = rows.map((row, i) => {
+    const cols = columns.length ? columns : Object.keys(row)
+    const fields = cols.filter(c=>c.toLowerCase()!=='source').map(col => {
+      const val = row[col] || '-'
+      const safeVal = val.replace(/'/g,"\\'")
+      return `<div class="field-row">
+        <span class="field-icon">${getEmoji(col)}</span>
+        <span class="field-key">${col.toUpperCase()}</span>
+        <span class="field-val">${val}
+          <button class="copy-btn" onclick="copyVal('${safeVal}')">COPY</button>
+        </span>
+      </div>`
+    }).join('')
+    return `<div class="record-block">
+      ${rows.length>1?`<div class="record-num">// RECORD ${i+1} OF ${rows.length}</div>`:''}
+      ${fields}
+    </div>`
+  }).join('')
+
+  div.innerHTML = `<div class="result-card">
+    <div class="result-header">
+      <span class="result-title">// Results</span>
+      <span class="result-badge">${rows.length} FOUND</span>
+    </div>
+    ${recordsHtml}
+  </div>`
+
+  updateStats(rows.length)
+  addHistory(number)
+}
+
+function updateStats(found) {
+  totalSearches++
+  totalFound += found
+  localStorage.setItem('ts', totalSearches)
+  localStorage.setItem('tf', totalFound)
+  document.getElementById('totalSearches').textContent = totalSearches
+  document.getElementById('totalFound').textContent = totalFound
+}
+
+function copyVal(val) {
+  navigator.clipboard?.writeText(val)
+    .then(() => showToast('✓ Copied: ' + val))
+    .catch(() => showToast('Copy failed'))
+}
+
+// ============================================================
+// Main search
+// ============================================================
+async function doSearch() {
+  const number = inp.value.trim()
+  if (!number || !/^\d{10,13}$/.test(number)) {
+    inp.classList.add('invalid')
+    showToast('❌ Enter 10–13 digits')
+    inp.focus()
+    return
+  }
+
+  if (!deviceFP) {
+    showToast('⏳ Still initializing, try again...')
+    return
+  }
+
+  setBusy(true)
+  setStatus(`// Searching ${number}...`)
+  document.getElementById('results').innerHTML = ''
+
+  try {
+    const resp = await fetch('/api/lookup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ number, deviceFingerprint: deviceFP })
+    })
+    const data = await resp.json()
+    renderResults(data, number)
+    setStatus(`// Done`)
+  } catch(err) {
+    document.getElementById('results').innerHTML = `<div class="msg-box error">
+      <div class="msg-icon">❌</div>
+      <div class="msg-title">Connection Error</div>
+      <div class="msg-sub">// ${err.message}</div>
+    </div>`
+    setStatus('// Error — check server')
+  }
+
+  setBusy(false)
+}
+
+function searchNumber(num) {
+  inp.value = num
+  doSearch()
+}
+</script>
+</body>
+</html>
