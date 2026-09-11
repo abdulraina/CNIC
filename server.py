@@ -24,7 +24,6 @@ HEADERS = {
 # Network logo helpers
 # ---------------------------------------------------------------------------
 
-# Map image filename (lowercase, no extension, no separators) → canonical name
 _NETWORK_FILENAME_MAP = {
     "jazz":    "Jazz",
     "zong":    "Zong",
@@ -33,32 +32,23 @@ _NETWORK_FILENAME_MAP = {
     "warid":   "Warid",
     "scom":    "SCOM",
     "ptcl":    "PTCL",
-    # The upstream site uses "Mob.png" as a generic/older icon.
-    # Change this if you know it maps to a specific network.
     "mob":     "Moblink",
 }
 
 
 def _network_from_image(img_tag):
-    """
-    Extract (network_name, full_logo_url) from an <img> tag.
-    Returns ("", "") if nothing usable.
-    """
     if not img_tag:
         return "", ""
 
-    # 1. Prefer alt / title attributes if meaningful
     for attr in ("alt", "title", "data-name", "data-network"):
         val = (img_tag.get(attr) or "").strip()
         if val and val.lower() not in ("network", "logo", "img", "icon"):
             return val, ""
 
-    # 2. Fall back to the src filename
     src = (img_tag.get("src") or "").strip()
     if not src:
         return "", ""
 
-    # Build full URL for the logo
     if src.startswith("//"):
         full_url = "https:" + src
     elif src.startswith("http://") or src.startswith("https://"):
@@ -76,25 +66,18 @@ def _network_from_image(img_tag):
     if canonical:
         return canonical, full_url
 
-    # Unknown filename → best-effort title-case
     pretty = re.sub(r"[_\-\s]+", " ", filename).strip().title()
     return pretty or "", full_url
 
 
 def _cell_text(td):
-    """
-    Return visible text of a <td>. If empty, fall back to the network
-    name derived from any <img> inside it.
-    """
     text = td.get_text(" ", strip=True)
     if text:
         return text
-
     img = td.find("img")
     if img:
         name, _ = _network_from_image(img)
         return name
-
     return ""
 
 
@@ -103,26 +86,17 @@ def _cell_text(td):
 # ---------------------------------------------------------------------------
 
 def normalize_cnic(value: str) -> str:
-    """Strip all non-digits from a CNIC."""
     return re.sub(r"\D", "", value or "")
 
 
 def normalize_mobile(value: str) -> str:
-    """
-    Normalize a Pakistani mobile number to 11-digit form (03XXXXXXXXX).
-    Accepts: 03001234567, 3001234567, +923001234567,
-             00923001234567, 92-300-1234567, +92 300 1234567
-    """
     digits = re.sub(r"\D", "", value or "")
-
     if digits.startswith("0092"):
         digits = digits[4:]
     elif digits.startswith("92") and len(digits) == 12:
         digits = digits[2:]
-
     if len(digits) == 10 and digits.startswith("3"):
         digits = "0" + digits
-
     return digits
 
 
@@ -138,29 +112,21 @@ def is_valid_mobile(value: str) -> bool:
 
 
 def detect_input_type(raw: str) -> str:
-    """
-    Return 'cnic' | 'mobile' | 'invalid'.
-    """
     digits = re.sub(r"\D", "", raw or "")
-
     stripped = digits
     if stripped.startswith("0092"):
         stripped = stripped[4:]
     elif stripped.startswith("92") and len(stripped) == 12:
         stripped = stripped[2:]
 
-    # 13 digits not starting with 0 → CNIC
     if len(digits) == 13 and not digits.startswith("0"):
         return "cnic"
-
-    # Mobile variants
     if len(stripped) == 11 and stripped.startswith("03"):
         return "mobile"
     if len(stripped) == 10 and stripped.startswith("3"):
         return "mobile"
     if len(stripped) == 11 and stripped.startswith("0"):
         return "mobile"
-
     return "invalid"
 
 
@@ -197,6 +163,77 @@ def parse_results(html: str):
             "network_image": network_logo,
         })
     return results
+
+
+# ---------------------------------------------------------------------------
+# Upstream lookup
+# ---------------------------------------------------------------------------
+
+def _fetch_upstream(query_value: str):
+    """
+    POST to upstream and return parsed results (or raise).
+    """
+    resp = requests.post(
+        BASE_URL,
+        headers=HEADERS,
+        data={"numberCnic": query_value, "searchNumber": "search"},
+        timeout=20,
+    )
+    resp.raise_for_status()
+    return parse_results(resp.text)
+
+
+def _pick_cnic_from_results(results, searched_mobile: str = "") -> str:
+    """
+    Find a valid 13-digit CNIC from the results.
+    Prefers the row whose mobile matches the searched number.
+    """
+    searched = normalize_mobile(searched_mobile) if searched_mobile else ""
+
+    # 1. Try the row that matches the searched mobile
+    if searched:
+        for r in results:
+            if normalize_mobile(r.get("mobile", "")) == searched:
+                c = normalize_cnic(r.get("cnic", ""))
+                if len(c) == 13:
+                    return c
+
+    # 2. Otherwise, first valid CNIC in the list
+    for r in results:
+        c = normalize_cnic(r.get("cnic", ""))
+        if len(c) == 13:
+            return c
+
+    return ""
+
+
+def _dedupe(results):
+    """Deduplicate by (normalized mobile, normalized cnic). Preserves order."""
+    seen = set()
+    out = []
+    for r in results:
+        key = (normalize_mobile(r.get("mobile", "")),
+               normalize_cnic(r.get("cnic", "")))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(r)
+    return out
+
+
+def _merge_mobile_then_cnic(mobile_results, cnic_results, searched_mobile):
+    """
+    Put the row matching the searched mobile first, then all mobile-lookup rows,
+    then all CNIC-lookup rows. Deduplicate.
+    """
+    searched = normalize_mobile(searched_mobile)
+    prioritized = [r for r in mobile_results
+                   if normalize_mobile(r.get("mobile", "")) == searched]
+    rest_mobile = [r for r in mobile_results
+                   if normalize_mobile(r.get("mobile", "")) != searched]
+
+    merged = prioritized + rest_mobile + cnic_results
+    return _dedupe(merged)
 
 
 # ---------------------------------------------------------------------------
@@ -239,7 +276,6 @@ def search():
                 "error": "Invalid CNIC. Must be 13 digits (e.g., 4530448083059)."
             }), 400
         query_type = "cnic"
-
     elif kind == "mobile":
         query_value = normalize_mobile(raw)
         if not is_valid_mobile(query_value):
@@ -248,45 +284,69 @@ def search():
                 "error": "Invalid mobile number. Use 11-digit format (e.g., 03001234567)."
             }), 400
         query_type = "mobile"
-
     else:
         return jsonify({
             "success": False,
             "error": "Unrecognized input. Enter a 13-digit CNIC or 11-digit mobile number."
         }), 400
 
+    # ---- First lookup -----------------------------------------------------
     try:
-        resp = requests.post(
-            BASE_URL,
-            headers=HEADERS,
-            data={"numberCnic": query_value, "searchNumber": "search"},
-            timeout=20,
-        )
-        resp.raise_for_status()
+        first_results = _fetch_upstream(query_value)
     except requests.RequestException as e:
         return jsonify({
             "success": False,
             "error": f"Upstream request failed: {str(e)}"
         }), 502
 
-    results = parse_results(resp.text)
+    meta = {
+        "query_type": query_type,
+        "auto_cnic_lookup": False,
+        "auto_cnic": "",
+        "first_lookup_count": len(first_results),
+        "second_lookup_count": 0,
+    }
 
-    if not results:
+    final_results = first_results
+
+    # ---- Second lookup (only when searching a mobile) ---------------------
+    if query_type == "mobile" and first_results:
+        discovered_cnic = _pick_cnic_from_results(first_results, searched_mobile=query_value)
+
+        if discovered_cnic:
+            meta["auto_cnic"] = discovered_cnic
+            try:
+                cnic_results = _fetch_upstream(discovered_cnic)
+                meta["auto_cnic_lookup"] = True
+                meta["second_lookup_count"] = len(cnic_results)
+
+                final_results = _merge_mobile_then_cnic(
+                    mobile_results=first_results,
+                    cnic_results=cnic_results,
+                    searched_mobile=query_value,
+                )
+            except requests.RequestException:
+                # Second lookup failed → silently fall back to first results
+                pass
+
+    if not final_results:
         return jsonify({
             "success": True,
             "count": 0,
             "query": query_value,
             "type": query_type,
             "results": [],
+            "meta": meta,
             "message": f"No results found for this {query_type.upper()}.",
         })
 
     return jsonify({
         "success": True,
-        "count": len(results),
+        "count": len(final_results),
         "query": query_value,
         "type": query_type,
-        "results": results,
+        "results": final_results,
+        "meta": meta,
     })
 
 
