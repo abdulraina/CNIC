@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>CNIC Lookup</title>
+<title>FreshSIMTracker — CNIC &amp; Mobile Lookup</title>
 <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;600;800&display=swap" rel="stylesheet">
 <style>
   :root {
@@ -41,6 +41,7 @@
   .search-btn:hover{background:var(--green-dim);transform:translateY(-1px);box-shadow:0 4px 20px var(--green-glow);}
   .search-btn:disabled{opacity:0.5;cursor:not-allowed;transform:none;}
   .hint{font-size:12px;color:var(--muted);font-family:var(--mono);margin-top:10px;}
+  .hint strong{color:var(--green);font-weight:700;}
   .rate-warning{background:rgba(255,204,0,0.08);border:1px solid rgba(255,204,0,0.3);border-radius:10px;padding:12px 16px;font-family:var(--mono);font-size:12px;color:var(--yellow);margin-top:12px;display:none;}
   .loader{display:none;text-align:center;padding:40px;}
   .loader.active{display:block;}
@@ -84,8 +85,8 @@
 <div class="wrapper">
   <div class="header">
     <div class="logo">
-      <div class="logo-icon">🔍</div>
-      <span class="logo-text">CNIC.LOOKUP</span>
+      <div class="logo-icon">📱</div>
+      <span class="logo-text">FRESHSIMTRACKER</span>
     </div>
     <p class="tagline">Pakistan SIM &amp; CNIC Tracker</p>
   </div>
@@ -114,14 +115,17 @@
     <span class="search-label">// Search Database</span>
     <div class="input-row">
       <input type="tel" id="searchInput" class="search-input"
-        placeholder="03001234567 or CNIC..."
+        placeholder="03001234567 or 4530448083059"
         maxlength="13" autocomplete="off" inputmode="numeric">
       <button class="search-btn" id="searchBtn" onclick="doSearch()">
         <span id="btnIcon">⚡</span>
         <span id="btnText">Search</span>
       </button>
     </div>
-    <p class="hint">// Enter 10–13 digit SIM or CNIC number</p>
+    <p class="hint">
+      // <strong>CNIC:</strong> 13 digits (e.g. 4530448083059) &nbsp;•&nbsp;
+      <strong>Mobile:</strong> 11 digits starting with 03 (e.g. 03001234567)
+    </p>
     <div class="rate-warning" id="rateWarning">
       ⚠ Rate limit reached. Resets in <span id="resetTime">--</span> minutes.
     </div>
@@ -144,54 +148,30 @@
 
 <script>
 // ============================================================
-// Device Fingerprinting
-// Collects stable browser signals that survive IP changes,
-// incognito mode, and clearing cookies/localStorage
+// Device Fingerprinting (unchanged)
 // ============================================================
 async function getDeviceFingerprint() {
   const signals = []
-
-  // 1. Screen resolution + color depth
   signals.push(`${screen.width}x${screen.height}x${screen.colorDepth}`)
-
-  // 2. Timezone
   signals.push(Intl.DateTimeFormat().resolvedOptions().timeZone)
-
-  // 3. Language
-  signals.push(navigator.language + navigator.languages?.join(','))
-
-  // 4. Platform
+  signals.push(navigator.language + (navigator.languages?.join(',')||''))
   signals.push(navigator.platform || '')
-
-  // 5. Hardware concurrency (CPU cores)
   signals.push(navigator.hardwareConcurrency || 0)
-
-  // 6. Device memory
   signals.push(navigator.deviceMemory || 0)
-
-  // 7. Touch points
   signals.push(navigator.maxTouchPoints || 0)
+  signals.push(navigator.userAgent.replace(/[\d.]+/g, ''))
 
-  // 8. User agent (stripped of version numbers for stability)
-  const ua = navigator.userAgent.replace(/[\d.]+/g, '')
-  signals.push(ua)
-
-  // 9. Canvas fingerprint — unique per device GPU/driver
   try {
     const canvas = document.createElement('canvas')
     const ctx = canvas.getContext('2d')
     ctx.textBaseline = 'top'
     ctx.font = '14px Arial'
-    ctx.fillStyle = '#f60'
-    ctx.fillRect(125, 1, 62, 20)
-    ctx.fillStyle = '#069'
-    ctx.fillText('CNIC.lookup🔍', 2, 15)
-    ctx.fillStyle = 'rgba(102,204,0,0.7)'
-    ctx.fillText('CNIC.lookup🔍', 4, 17)
+    ctx.fillStyle = '#f60'; ctx.fillRect(125, 1, 62, 20)
+    ctx.fillStyle = '#069'; ctx.fillText('FRESHSIM🔍', 2, 15)
+    ctx.fillStyle = 'rgba(102,204,0,0.7)'; ctx.fillText('FRESHSIM🔍', 4, 17)
     signals.push(canvas.toDataURL().slice(-50))
   } catch { signals.push('no-canvas') }
 
-  // 10. WebGL renderer — unique per GPU
   try {
     const gl = document.createElement('canvas').getContext('webgl')
     const ext = gl?.getExtension('WEBGL_debug_renderer_info')
@@ -201,52 +181,35 @@ async function getDeviceFingerprint() {
     }
   } catch { signals.push('no-webgl') }
 
-  // 11. Audio fingerprint
   try {
     const AudioCtx = window.AudioContext || window.webkitAudioContext
     if (AudioCtx) {
       const ctx = new AudioCtx()
       const osc = ctx.createOscillator()
       const analyser = ctx.createAnalyser()
-      const gain = ctx.createGain()
-      gain.gain.value = 0
-      osc.connect(analyser)
-      analyser.connect(gain)
-      gain.connect(ctx.destination)
+      const gain = ctx.createGain(); gain.gain.value = 0
+      osc.connect(analyser); analyser.connect(gain); gain.connect(ctx.destination)
       osc.start(0)
       const data = new Float32Array(analyser.frequencyBinCount)
       analyser.getFloatFrequencyData(data)
       signals.push(data.slice(0, 10).join(','))
-      osc.stop()
-      ctx.close()
+      osc.stop(); ctx.close()
     }
   } catch { signals.push('no-audio') }
 
-  // 12. Installed fonts (check a few common ones)
   const testFonts = ['Arial','Courier New','Georgia','Times New Roman','Verdana','Tahoma']
-  const canvas2 = document.createElement('canvas')
-  const ctx2 = canvas2.getContext('2d')
+  const c2 = document.createElement('canvas').getContext('2d')
   const baseFonts = ['monospace','sans-serif','serif']
-  const defaultWidths = {}
-  baseFonts.forEach(b => {
-    ctx2.font = `72px ${b}`
-    defaultWidths[b] = ctx2.measureText('mmmmm').width
-  })
-  const detected = testFonts.filter(font => {
-    return baseFonts.some(base => {
-      ctx2.font = `72px '${font}',${base}`
-      return ctx2.measureText('mmmmm').width !== defaultWidths[base]
-    })
-  })
+  const dW = {}; baseFonts.forEach(b => { c2.font = `72px ${b}`; dW[b] = c2.measureText('mmmmm').width })
+  const detected = testFonts.filter(f => baseFonts.some(b => {
+    c2.font = `72px '${f}',${b}`
+    return c2.measureText('mmmmm').width !== dW[b]
+  }))
   signals.push(detected.join(','))
 
-  // Hash all signals together
   const raw = signals.join('|||')
-  const encoder = new TextEncoder()
-  const data = encoder.encode(raw)
-  const hashBuffer = await crypto.subtle.digest('SHA-256', data)
-  const hashArray = Array.from(new Uint8Array(hashBuffer))
-  return hashArray.map(b => b.toString(16).padStart(2,'0')).join('').slice(0, 40)
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(raw))
+  return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('').slice(0,40)
 }
 
 // ============================================================
@@ -258,6 +221,16 @@ let totalFound   = parseInt(localStorage.getItem('tf') || '0')
 
 document.getElementById('totalSearches').textContent = totalSearches
 document.getElementById('totalFound').textContent = totalFound
+
+// ============================================================
+// Input type detection (CNIC vs Mobile)
+// ============================================================
+function detectInputType(value) {
+  const digits = String(value || '').replace(/\D/g, '')
+  if (digits.length === 13) return 'cnic'
+  if (digits.length === 11 && digits.startsWith('03')) return 'mobile'
+  return null
+}
 
 // ============================================================
 // Load server status
@@ -301,18 +274,20 @@ window.addEventListener('load', async () => {
 })
 
 // ============================================================
-// Input
+// Input handling — accept digits only, up to 13 chars
 // ============================================================
 const inp = document.getElementById('searchInput')
 inp.addEventListener('input', function() {
   this.value = this.value.replace(/\D/g,'').slice(0,13)
-  const l = this.value.length
-  this.className = 'search-input' + (l>=10&&l<=13?' valid':l>0?' invalid':'')
+  const type = detectInputType(this.value)
+  if (this.value.length === 0)      this.className = 'search-input'
+  else if (type)                    this.className = 'search-input valid'
+  else                              this.className = 'search-input invalid'
 })
 inp.addEventListener('keydown', e => { if(e.key==='Enter') doSearch() })
 
 // ============================================================
-// Toast
+// Toast / status / busy
 // ============================================================
 function showToast(msg) {
   const t = document.getElementById('toast')
@@ -320,11 +295,7 @@ function showToast(msg) {
   t.classList.add('show')
   setTimeout(() => t.classList.remove('show'), 2500)
 }
-
-function setStatus(msg) {
-  document.getElementById('statusText').textContent = msg
-}
-
+function setStatus(msg) { document.getElementById('statusText').textContent = msg }
 function setBusy(busy) {
   document.getElementById('searchBtn').disabled = busy
   document.getElementById('btnIcon').textContent = busy ? '⏳' : '⚡'
@@ -366,10 +337,10 @@ function timeAgo(ts) {
 }
 
 // ============================================================
-// Render results
+// Emoji per field
 // ============================================================
 function getEmoji(col) {
-  const c = col.toLowerCase()
+  const c = String(col).toLowerCase()
   if(c.includes('name'))    return '👤'
   if(c.includes('number')||c.includes('mobile')) return '📱'
   if(c.includes('cnic'))    return '🆔'
@@ -378,12 +349,14 @@ function getEmoji(col) {
   return '▪️'
 }
 
+// ============================================================
+// Render results — handles BOTH the JSON row format AND the
+// freshsimtracker flat object {mobile,name,cnic,address,network}
+// ============================================================
 function renderResults(data, number) {
-  const records = data.records || {}
-  const error   = data.Error || records.Error
-  const div     = document.getElementById('results')
+  const div = document.getElementById('results')
 
-  // Update remaining
+  // Update remaining counter
   if (data._remaining !== undefined) {
     document.getElementById('remainingSearches').textContent = data._remaining
     if (data._remaining === 0) {
@@ -391,6 +364,7 @@ function renderResults(data, number) {
     }
   }
 
+  const error = data.Error || data.error
   if (error) {
     if (data.rate_limited) {
       div.innerHTML = `<div class="msg-box error">
@@ -409,25 +383,36 @@ function renderResults(data, number) {
     return
   }
 
-  if (records.PaidGate) {
-    const rows = records.Rows || []
-    const names = rows.map(r => `<div class="field-row">
-      <span class="field-icon">👤</span>
-      <span class="field-key">NAME</span>
-      <span class="field-val">${r.Name||'Hidden'}</span>
-    </div>`).join('')
-    div.innerHTML = `<div class="msg-box">
-      <div class="msg-icon">🔒</div>
-      <div class="msg-title" style="color:var(--yellow)">Paid Record</div>
-      <div class="msg-sub" style="margin-bottom:16px">// Full details require payment</div>
-      ${names}
-    </div>`
-    updateStats(rows.length)
-    return
-  }
+  // Detect flat freshsimtracker response: { mobile, name, cnic, address, network }
+  const isFlat = ('mobile' in data) || ('name' in data && 'cnic' in data)
 
-  const rows    = records.Rows || []
-  const columns = records.Columns || []
+  let rows = []
+  let columns = []
+
+  if (isFlat) {
+    columns = ['mobile','name','cnic','address','network'].filter(k => data[k])
+    rows = [data]
+  } else {
+    const records = data.records || {}
+    if (records.PaidGate) {
+      const rRows = records.Rows || []
+      const names = rRows.map(r => `<div class="field-row">
+        <span class="field-icon">👤</span>
+        <span class="field-key">NAME</span>
+        <span class="field-val">${r.Name||'Hidden'}</span>
+      </div>`).join('')
+      div.innerHTML = `<div class="msg-box">
+        <div class="msg-icon">🔒</div>
+        <div class="msg-title" style="color:var(--yellow)">Paid Record</div>
+        <div class="msg-sub" style="margin-bottom:16px">// Full details require payment</div>
+        ${names}
+      </div>`
+      updateStats(rRows.length)
+      return
+    }
+    rows = records.Rows || []
+    columns = records.Columns || []
+  }
 
   if (!rows.length) {
     div.innerHTML = `<div class="msg-box">
@@ -440,27 +425,31 @@ function renderResults(data, number) {
   }
 
   const recordsHtml = rows.map((row, i) => {
-    const cols = columns.length ? columns : Object.keys(row)
-    const fields = cols.filter(c=>c.toLowerCase()!=='source').map(col => {
-      const val = row[col] || '-'
-      const safeVal = val.replace(/'/g,"\\'")
-      return `<div class="field-row">
-        <span class="field-icon">${getEmoji(col)}</span>
-        <span class="field-key">${col.toUpperCase()}</span>
-        <span class="field-val">${val}
-          <button class="copy-btn" onclick="copyVal('${safeVal}')">COPY</button>
-        </span>
-      </div>`
-    }).join('')
+    const cols = columns.length ? columns : Object.keys(row).filter(k => !k.startsWith('_'))
+    const fields = cols
+      .filter(c => c.toLowerCase() !== 'source' && !String(c).startsWith('_'))
+      .map(col => {
+        const val = row[col] ?? '-'
+        const safeVal = String(val).replace(/'/g,"\\'").replace(/"/g,'&quot;')
+        return `<div class="field-row">
+          <span class="field-icon">${getEmoji(col)}</span>
+          <span class="field-key">${String(col).toUpperCase()}</span>
+          <span class="field-val">${val}
+            <button class="copy-btn" onclick="copyVal('${safeVal}')">COPY</button>
+          </span>
+        </div>`
+      }).join('')
     return `<div class="record-block">
       ${rows.length>1?`<div class="record-num">// RECORD ${i+1} OF ${rows.length}</div>`:''}
       ${fields}
     </div>`
   }).join('')
 
+  const label = data._queryType === 'mobile' ? 'MOBILE' : (data._queryType === 'cnic' ? 'CNIC' : 'RESULT')
+
   div.innerHTML = `<div class="result-card">
     <div class="result-header">
-      <span class="result-title">// Results</span>
+      <span class="result-title">// ${label} RESULTS</span>
       <span class="result-badge">${rows.length} FOUND</span>
     </div>
     ${recordsHtml}
@@ -489,10 +478,12 @@ function copyVal(val) {
 // Main search
 // ============================================================
 async function doSearch() {
-  const number = inp.value.trim()
-  if (!number || !/^\d{10,13}$/.test(number)) {
+  const raw = inp.value.trim()
+  const type = detectInputType(raw)
+
+  if (!type) {
     inp.classList.add('invalid')
-    showToast('❌ Enter 10–13 digits')
+    showToast('❌ Enter 13-digit CNIC or 11-digit mobile (03...)')
     inp.focus()
     return
   }
@@ -503,18 +494,22 @@ async function doSearch() {
   }
 
   setBusy(true)
-  setStatus(`// Searching ${number}...`)
+  setStatus(`// Searching ${raw} (${type.toUpperCase()})...`)
   document.getElementById('results').innerHTML = ''
 
   try {
     const resp = await fetch('/api/lookup', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ number, deviceFingerprint: deviceFP })
+      body: JSON.stringify({
+        query: raw,               // ← unified field, backend accepts both
+        number: raw,              // ← legacy field, still supported
+        deviceFingerprint: deviceFP
+      })
     })
     const data = await resp.json()
-    renderResults(data, number)
-    setStatus(`// Done`)
+    renderResults(data, raw)
+    setStatus('// Done')
   } catch(err) {
     document.getElementById('results').innerHTML = `<div class="msg-box error">
       <div class="msg-icon">❌</div>
