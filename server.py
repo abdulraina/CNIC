@@ -45,8 +45,6 @@ HEADERS = {
 session = requests.Session()
 session.headers.update(HEADERS)
 
-# freshsimtracker doesn't use CSRF tokens in the same way, but we still
-# warm the session once so cookies are ready.
 session_initialized = False
 
 # ============================================================
@@ -89,7 +87,7 @@ def detect_query_type(value: str):
 
 
 # ============================================================
-# Upstream session (freshsimtracker doesn't require CSRF)
+# Upstream session warm-up (freshsimtracker doesn't require CSRF)
 # ============================================================
 def init_cnic_session():
     global session_initialized
@@ -110,6 +108,7 @@ def parse_results(html: str):
     """
     freshsimtracker returns an HTML table (table.table) with 5 columns:
     Mobile | Name | CNIC | Address | Network
+    Returns ALL rows found.
     """
     soup = BeautifulSoup(html, "html.parser")
     table = soup.select_one("table.table")
@@ -135,7 +134,7 @@ def parse_results(html: str):
 def do_lookup(number):
     """
     POST numberCnic=<value>&searchNumber=search to /numberDetails.php
-    and parse the resulting table.
+    and parse ALL rows from the resulting table.
     """
     try:
         resp = session.post(
@@ -153,8 +152,8 @@ def do_lookup(number):
         if not results:
             return {"Error": "No record found for this CNIC/mobile number."}
 
-        # Return first match (consistent with the CLI behaviour)
-        return results[0]
+        # ✅ Return ALL rows
+        return {"records": results}
 
     except requests.exceptions.Timeout:
         return {"Error": "Request timed out. Try again."}
@@ -181,7 +180,6 @@ def lookup():
 
     device_fp = data.get("deviceFingerprint", "").strip()
 
-    # Accept new "query" field, plus legacy "number"/"cnic"/"mobile"
     raw_input = (
         data.get("query")
         or data.get("number")
@@ -210,7 +208,6 @@ def lookup():
             "reset_in": reset_mins
         }), 429
 
-    # === Validate input: 13-digit CNIC OR 11-digit mobile (03...) ===
     qtype, number = detect_query_type(raw_input)
 
     if qtype is None:
@@ -336,7 +333,7 @@ def admin_limits():
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta http-equiv="refresh" content="30">
-<title>Admin Panel — CNIC Lookup</title>
+<title>Admin Panel — FreshSIMTracker</title>
 <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;600;800&display=swap" rel="stylesheet">
 <style>
   :root {{
