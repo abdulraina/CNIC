@@ -8,46 +8,118 @@ from bs4 import BeautifulSoup
 app = Flask(__name__)
 CORS(app)
 
-BASE_URL = "https://freshsimtracker.com/numberDetails.php"
+BASE_URL  = "https://freshsimtracker.com/numberDetails.php"
+BASE_SITE = "https://freshsimtracker.com"
+
 HEADERS = {
-    "Origin": "https://freshsimtracker.com",
-    "Referer": "https://freshsimtracker.com/",
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                  "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Origin":       "https://freshsimtracker.com",
+    "Referer":      "https://freshsimtracker.com/",
+    "User-Agent":   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Content-Type": "application/x-www-form-urlencoded",
 }
 
-# Pakistani mobile prefixes (without leading 0 or +92) → e.g. 300, 301, ... 349
-VALID_MOBILE_PREFIXES = {
-    "30", "31", "32", "33", "34", "35",
-    "40", "41", "42", "43", "44", "45",
-    "46", "47", "48", "49",
-    "50", "51", "52", "53", "54", "55",
-    "56", "57", "58", "59",
-    "20", "21", "22", "23", "24", "25",
-    "26", "27", "28", "29",
+
+# ---------------------------------------------------------------------------
+# Network logo helpers
+# ---------------------------------------------------------------------------
+
+# Map image filename (lowercase, no extension, no separators) → canonical name
+_NETWORK_FILENAME_MAP = {
+    "jazz":    "Jazz",
+    "zong":    "Zong",
+    "ufone":   "Ufone",
+    "telenor": "Telenor",
+    "warid":   "Warid",
+    "scom":    "SCOM",
+    "ptcl":    "PTCL",
+    # The upstream site uses "Mob.png" as a generic/older icon.
+    # Change this if you know it maps to a specific network.
+    "mob":     "Zong",
 }
 
 
+def _network_from_image(img_tag):
+    """
+    Extract (network_name, full_logo_url) from an <img> tag.
+    Returns ("", "") if nothing usable.
+    """
+    if not img_tag:
+        return "", ""
+
+    # 1. Prefer alt / title attributes if meaningful
+    for attr in ("alt", "title", "data-name", "data-network"):
+        val = (img_tag.get(attr) or "").strip()
+        if val and val.lower() not in ("network", "logo", "img", "icon"):
+            return val, ""
+
+    # 2. Fall back to the src filename
+    src = (img_tag.get("src") or "").strip()
+    if not src:
+        return "", ""
+
+    # Build full URL for the logo
+    if src.startswith("//"):
+        full_url = "https:" + src
+    elif src.startswith("http://") or src.startswith("https://"):
+        full_url = src
+    elif src.startswith("/"):
+        full_url = BASE_SITE + src
+    else:
+        full_url = BASE_SITE + "/" + src
+
+    filename = src.split("?")[0].split("/")[-1]
+    filename = re.sub(r"\.(png|jpe?g|gif|svg|webp|bmp)$", "", filename, flags=re.I)
+    key = filename.lower().strip().replace("_", "").replace("-", "").replace(" ", "")
+
+    canonical = _NETWORK_FILENAME_MAP.get(key)
+    if canonical:
+        return canonical, full_url
+
+    # Unknown filename → best-effort title-case
+    pretty = re.sub(r"[_\-\s]+", " ", filename).strip().title()
+    return pretty or "", full_url
+
+
+def _cell_text(td):
+    """
+    Return visible text of a <td>. If empty, fall back to the network
+    name derived from any <img> inside it.
+    """
+    text = td.get_text(" ", strip=True)
+    if text:
+        return text
+
+    img = td.find("img")
+    if img:
+        name, _ = _network_from_image(img)
+        return name
+
+    return ""
+
+
+# ---------------------------------------------------------------------------
+# Input validation
+# ---------------------------------------------------------------------------
+
 def normalize_cnic(value: str) -> str:
-    """Strip non-digits from a CNIC."""
+    """Strip all non-digits from a CNIC."""
     return re.sub(r"\D", "", value or "")
 
 
 def normalize_mobile(value: str) -> str:
     """
     Normalize a Pakistani mobile number to 11-digit form (03XXXXXXXXX).
-    Accepts: 03001234567, 3001234567, +923001234567, 00923001234567, 92-300-1234567
+    Accepts: 03001234567, 3001234567, +923001234567,
+             00923001234567, 92-300-1234567, +92 300 1234567
     """
     digits = re.sub(r"\D", "", value or "")
 
-    # Strip country code variations
     if digits.startswith("0092"):
         digits = digits[4:]
     elif digits.startswith("92") and len(digits) == 12:
         digits = digits[2:]
 
-    # Add leading 0 if missing (10-digit local form: 3XXXXXXXXX)
     if len(digits) == 10 and digits.startswith("3"):
         digits = "0" + digits
 
@@ -60,31 +132,24 @@ def is_valid_cnic(value: str) -> bool:
 
 def is_valid_mobile(value: str) -> bool:
     m = normalize_mobile(value)
-    if len(m) != 11 or not m.startswith("0"):
+    if len(m) != 11 or not m.startswith("03"):
         return False
-    # Must start with 03
-    if not m.startswith("03"):
-        return False
-    # Third digit must be a valid Pakistani mobile prefix digit (0-4)
-    # Format: 03XXXXXXXXX  → 11 digits total
     return m[2] in "01234"
 
 
 def detect_input_type(raw: str) -> str:
     """
-    Returns 'cnic', 'mobile', or 'invalid' based on the given input.
-    Prefers CNIC if 13 digits (unambiguous), else mobile if 11/10/12/13 with leading 0/92.
+    Return 'cnic' | 'mobile' | 'invalid'.
     """
     digits = re.sub(r"\D", "", raw or "")
 
-    # Strip 92 / 0092 to compare fairly
     stripped = digits
     if stripped.startswith("0092"):
         stripped = stripped[4:]
     elif stripped.startswith("92") and len(stripped) == 12:
         stripped = stripped[2:]
 
-    # CNIC = 13 digits (no leading 0 in typical Pakistani CNIC)
+    # 13 digits not starting with 0 → CNIC
     if len(digits) == 13 and not digits.startswith("0"):
         return "cnic"
 
@@ -94,11 +159,14 @@ def detect_input_type(raw: str) -> str:
     if len(stripped) == 10 and stripped.startswith("3"):
         return "mobile"
     if len(stripped) == 11 and stripped.startswith("0"):
-        # Could still be a malformed CNIC — treat as mobile attempt
         return "mobile"
 
     return "invalid"
 
+
+# ---------------------------------------------------------------------------
+# HTML parsing
+# ---------------------------------------------------------------------------
 
 def parse_results(html: str):
     soup = BeautifulSoup(html, "html.parser")
@@ -108,18 +176,32 @@ def parse_results(html: str):
 
     results = []
     for row in table.select("tr"):
-        cells = [c.get_text(" ", strip=True) for c in row.select("td")]
+        cells = row.select("td")
         if len(cells) < 5:
             continue
+
+        network_td = cells[4]
+        img = network_td.find("img")
+
+        network_name = _cell_text(network_td)
+        network_logo = ""
+        if img:
+            _, network_logo = _network_from_image(img)
+
         results.append({
-            "mobile":  cells[0],
-            "name":    cells[1],
-            "cnic":    cells[2],
-            "address": cells[3],
-            "network": cells[4],
+            "mobile":        _cell_text(cells[0]),
+            "name":          _cell_text(cells[1]),
+            "cnic":          _cell_text(cells[2]),
+            "address":       _cell_text(cells[3]),
+            "network":       network_name,
+            "network_image": network_logo,
         })
     return results
 
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
 
 @app.route("/")
 def index():
@@ -133,7 +215,6 @@ def search():
     else:
         data = request.form.to_dict() or request.args.to_dict()
 
-    # Accept any of these keys from client
     raw = (
         data.get("query")
         or data.get("numberCnic")
@@ -174,7 +255,6 @@ def search():
             "error": "Unrecognized input. Enter a 13-digit CNIC or 11-digit mobile number."
         }), 400
 
-    # Upstream site uses the same field name for both lookups
     try:
         resp = requests.post(
             BASE_URL,
