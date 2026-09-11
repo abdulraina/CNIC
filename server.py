@@ -1,12 +1,12 @@
 import os
+import re
 from flask import Flask, request, jsonify, render_template
 from flask_cors import CORS
 import requests
 from bs4 import BeautifulSoup
-import re
 
 app = Flask(__name__)
-CORS(app)  # Enable CORS for all routes
+CORS(app)
 
 BASE_URL = "https://freshsimtracker.com/numberDetails.php"
 HEADERS = {
@@ -17,18 +17,92 @@ HEADERS = {
     "Content-Type": "application/x-www-form-urlencoded",
 }
 
+# Pakistani mobile prefixes (without leading 0 or +92) → e.g. 300, 301, ... 349
+VALID_MOBILE_PREFIXES = {
+    "30", "31", "32", "33", "34", "35",
+    "40", "41", "42", "43", "44", "45",
+    "46", "47", "48", "49",
+    "50", "51", "52", "53", "54", "55",
+    "56", "57", "58", "59",
+    "20", "21", "22", "23", "24", "25",
+    "26", "27", "28", "29",
+}
 
-def is_valid_cnic(cnic: str) -> bool:
-    """Validate CNIC: 13 digits, optionally with dashes."""
-    cleaned = re.sub(r"\D", "", cnic or "")
-    return len(cleaned) == 13
+
+def normalize_cnic(value: str) -> str:
+    """Strip non-digits from a CNIC."""
+    return re.sub(r"\D", "", value or "")
+
+
+def normalize_mobile(value: str) -> str:
+    """
+    Normalize a Pakistani mobile number to 11-digit form (03XXXXXXXXX).
+    Accepts: 03001234567, 3001234567, +923001234567, 00923001234567, 92-300-1234567
+    """
+    digits = re.sub(r"\D", "", value or "")
+
+    # Strip country code variations
+    if digits.startswith("0092"):
+        digits = digits[4:]
+    elif digits.startswith("92") and len(digits) == 12:
+        digits = digits[2:]
+
+    # Add leading 0 if missing (10-digit local form: 3XXXXXXXXX)
+    if len(digits) == 10 and digits.startswith("3"):
+        digits = "0" + digits
+
+    return digits
+
+
+def is_valid_cnic(value: str) -> bool:
+    return len(normalize_cnic(value)) == 13
+
+
+def is_valid_mobile(value: str) -> bool:
+    m = normalize_mobile(value)
+    if len(m) != 11 or not m.startswith("0"):
+        return False
+    # Must start with 03
+    if not m.startswith("03"):
+        return False
+    # Third digit must be a valid Pakistani mobile prefix digit (0-4)
+    # Format: 03XXXXXXXXX  → 11 digits total
+    return m[2] in "01234"
+
+
+def detect_input_type(raw: str) -> str:
+    """
+    Returns 'cnic', 'mobile', or 'invalid' based on the given input.
+    Prefers CNIC if 13 digits (unambiguous), else mobile if 11/10/12/13 with leading 0/92.
+    """
+    digits = re.sub(r"\D", "", raw or "")
+
+    # Strip 92 / 0092 to compare fairly
+    stripped = digits
+    if stripped.startswith("0092"):
+        stripped = stripped[4:]
+    elif stripped.startswith("92") and len(stripped) == 12:
+        stripped = stripped[2:]
+
+    # CNIC = 13 digits (no leading 0 in typical Pakistani CNIC)
+    if len(digits) == 13 and not digits.startswith("0"):
+        return "cnic"
+
+    # Mobile variants
+    if len(stripped) == 11 and stripped.startswith("03"):
+        return "mobile"
+    if len(stripped) == 10 and stripped.startswith("3"):
+        return "mobile"
+    if len(stripped) == 11 and stripped.startswith("0"):
+        # Could still be a malformed CNIC — treat as mobile attempt
+        return "mobile"
+
+    return "invalid"
 
 
 def parse_results(html: str):
-    """Parse the results table from the response HTML."""
     soup = BeautifulSoup(html, "html.parser")
     table = soup.select_one("table.table")
-
     if not table:
         return []
 
@@ -38,9 +112,9 @@ def parse_results(html: str):
         if len(cells) < 5:
             continue
         results.append({
-            "mobile": cells[0],
-            "name": cells[1],
-            "cnic": cells[2],
+            "mobile":  cells[0],
+            "name":    cells[1],
+            "cnic":    cells[2],
             "address": cells[3],
             "network": cells[4],
         })
@@ -54,28 +128,58 @@ def index():
 
 @app.route("/api/search", methods=["POST", "GET"])
 def search():
-    # Accept both JSON and form data
     if request.is_json:
         data = request.get_json(silent=True) or {}
     else:
         data = request.form.to_dict() or request.args.to_dict()
 
-    cnic = (data.get("numberCnic") or data.get("cnic") or "").strip()
+    # Accept any of these keys from client
+    raw = (
+        data.get("query")
+        or data.get("numberCnic")
+        or data.get("cnic")
+        or data.get("mobile")
+        or ""
+    ).strip()
 
-    if not cnic:
-        return jsonify({"success": False, "error": "CNIC is required."}), 400
-
-    if not is_valid_cnic(cnic):
+    if not raw:
         return jsonify({
             "success": False,
-            "error": "Invalid CNIC. Must be 13 digits (e.g., 4530448083059)."
+            "error": "Please enter a CNIC (13 digits) or mobile number (11 digits)."
         }), 400
 
+    kind = detect_input_type(raw)
+
+    if kind == "cnic":
+        query_value = normalize_cnic(raw)
+        if not is_valid_cnic(query_value):
+            return jsonify({
+                "success": False,
+                "error": "Invalid CNIC. Must be 13 digits (e.g., 4530448083059)."
+            }), 400
+        query_type = "cnic"
+
+    elif kind == "mobile":
+        query_value = normalize_mobile(raw)
+        if not is_valid_mobile(query_value):
+            return jsonify({
+                "success": False,
+                "error": "Invalid mobile number. Use 11-digit format (e.g., 03001234567)."
+            }), 400
+        query_type = "mobile"
+
+    else:
+        return jsonify({
+            "success": False,
+            "error": "Unrecognized input. Enter a 13-digit CNIC or 11-digit mobile number."
+        }), 400
+
+    # Upstream site uses the same field name for both lookups
     try:
         resp = requests.post(
             BASE_URL,
             headers=HEADERS,
-            data={"numberCnic": cnic, "searchNumber": "search"},
+            data={"numberCnic": query_value, "searchNumber": "search"},
             timeout=20,
         )
         resp.raise_for_status()
@@ -91,13 +195,17 @@ def search():
         return jsonify({
             "success": True,
             "count": 0,
+            "query": query_value,
+            "type": query_type,
             "results": [],
-            "message": "No results found for this CNIC.",
+            "message": f"No results found for this {query_type.upper()}.",
         })
 
     return jsonify({
         "success": True,
         "count": len(results),
+        "query": query_value,
+        "type": query_type,
         "results": results,
     })
 
@@ -108,7 +216,6 @@ def health():
 
 
 if __name__ == "__main__":
-    # Render provides PORT env var; fall back to 5000 for local dev
     port = int(os.environ.get("PORT", 5000))
     debug = os.environ.get("FLASK_DEBUG", "false").lower() == "true"
     app.run(host="0.0.0.0", port=port, debug=debug)
