@@ -33,14 +33,14 @@
   .search-label{font-family:var(--mono);font-size:11px;color:var(--green);letter-spacing:2px;text-transform:uppercase;margin-bottom:12px;display:block;}
   .input-row{display:flex;gap:10px;}
   .search-input{flex:1;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px 18px;font-family:var(--mono);font-size:16px;color:var(--text);outline:none;transition:all 0.2s;letter-spacing:2px;}
-  .search-input::placeholder{color:var(--muted);letter-spacing:1px;font-size:14px;}
+  .search-input::placeholder{color:var(--muted);letter-spacing:1px;font-size:13px;}
   .search-input:focus{border-color:var(--green);box-shadow:0 0 0 3px var(--green-glow);}
   .search-input.valid{border-color:var(--green);}
   .search-input.invalid{border-color:var(--red);}
   .search-btn{background:var(--green);color:#000;border:none;border-radius:10px;padding:14px 24px;font-family:var(--mono);font-size:14px;font-weight:700;cursor:pointer;transition:all 0.2s;white-space:nowrap;display:flex;align-items:center;gap:8px;}
   .search-btn:hover{background:var(--green-dim);transform:translateY(-1px);box-shadow:0 4px 20px var(--green-glow);}
   .search-btn:disabled{opacity:0.5;cursor:not-allowed;transform:none;}
-  .hint{font-size:12px;color:var(--muted);font-family:var(--mono);margin-top:10px;}
+  .hint{font-size:12px;color:var(--muted);font-family:var(--mono);margin-top:10px;line-height:1.6;}
   .hint strong{color:var(--green);font-weight:700;}
   .rate-warning{background:rgba(255,204,0,0.08);border:1px solid rgba(255,204,0,0.3);border-radius:10px;padding:12px 16px;font-family:var(--mono);font-size:12px;color:var(--yellow);margin-top:12px;display:none;}
   .loader{display:none;text-align:center;padding:40px;}
@@ -56,7 +56,7 @@
   .result-badge{background:var(--green-glow);border:1px solid var(--green);color:var(--green);font-family:var(--mono);font-size:11px;padding:3px 10px;border-radius:20px;}
   .record-block{padding:20px;border-bottom:1px solid var(--border);}
   .record-block:last-child{border-bottom:none;}
-  .record-num{font-family:var(--mono);font-size:10px;color:var(--muted);letter-spacing:2px;text-transform:uppercase;margin-bottom:14px;}
+  .record-num{font-family:var(--mono);font-size:10px;color:var(--green);letter-spacing:2px;text-transform:uppercase;margin-bottom:14px;padding-bottom:8px;border-bottom:1px dashed rgba(0,255,136,0.2);}
   .field-row{display:flex;align-items:flex-start;gap:12px;padding:10px 0;border-bottom:1px solid rgba(255,255,255,0.04);}
   .field-row:last-child{border-bottom:none;}
   .field-icon{font-size:16px;flex-shrink:0;margin-top:1px;width:22px;text-align:center;}
@@ -148,7 +148,7 @@
 
 <script>
 // ============================================================
-// Device Fingerprinting (unchanged)
+// Device Fingerprinting
 // ============================================================
 async function getDeviceFingerprint() {
   const signals = []
@@ -274,7 +274,7 @@ window.addEventListener('load', async () => {
 })
 
 // ============================================================
-// Input handling — accept digits only, up to 13 chars
+// Input handling
 // ============================================================
 const inp = document.getElementById('searchInput')
 inp.addEventListener('input', function() {
@@ -350,8 +350,7 @@ function getEmoji(col) {
 }
 
 // ============================================================
-// Render results — handles BOTH the JSON row format AND the
-// freshsimtracker flat object {mobile,name,cnic,address,network}
+// Render results — ALL rows
 // ============================================================
 function renderResults(data, number) {
   const div = document.getElementById('results')
@@ -364,6 +363,7 @@ function renderResults(data, number) {
     }
   }
 
+  // ---- Error handling ----
   const error = data.Error || data.error
   if (error) {
     if (data.rate_limited) {
@@ -383,35 +383,20 @@ function renderResults(data, number) {
     return
   }
 
-  // Detect flat freshsimtracker response: { mobile, name, cnic, address, network }
-  const isFlat = ('mobile' in data) || ('name' in data && 'cnic' in data)
-
+  // ---- Normalize to an array of flat row objects ----
   let rows = []
-  let columns = []
 
-  if (isFlat) {
-    columns = ['mobile','name','cnic','address','network'].filter(k => data[k])
+  // Shape A (new backend): { records: [ {mobile, name, cnic, address, network}, ... ] }
+  if (Array.isArray(data.records)) {
+    rows = data.records
+  }
+  // Shape B (legacy backend): { records: { Rows: [...], Columns: [...] } }
+  else if (data.records && Array.isArray(data.records.Rows)) {
+    rows = data.records.Rows
+  }
+  // Shape C (single flat object)
+  else if ('mobile' in data || ('name' in data && 'cnic' in data)) {
     rows = [data]
-  } else {
-    const records = data.records || {}
-    if (records.PaidGate) {
-      const rRows = records.Rows || []
-      const names = rRows.map(r => `<div class="field-row">
-        <span class="field-icon">👤</span>
-        <span class="field-key">NAME</span>
-        <span class="field-val">${r.Name||'Hidden'}</span>
-      </div>`).join('')
-      div.innerHTML = `<div class="msg-box">
-        <div class="msg-icon">🔒</div>
-        <div class="msg-title" style="color:var(--yellow)">Paid Record</div>
-        <div class="msg-sub" style="margin-bottom:16px">// Full details require payment</div>
-        ${names}
-      </div>`
-      updateStats(rRows.length)
-      return
-    }
-    rows = records.Rows || []
-    columns = records.Columns || []
   }
 
   if (!rows.length) {
@@ -424,28 +409,42 @@ function renderResults(data, number) {
     return
   }
 
+  // ---- Determine column order ----
+  const PREFERRED_ORDER = ['mobile', 'name', 'cnic', 'address', 'network']
+  const keysInRows = new Set()
+  rows.forEach(r => Object.keys(r).forEach(k => {
+    if (!k.startsWith('_')) keysInRows.add(k)
+  }))
+
+  const columns = [
+    ...PREFERRED_ORDER.filter(k => keysInRows.has(k)),
+    ...[...keysInRows].filter(k => !PREFERRED_ORDER.includes(k))
+  ]
+
+  // ---- Render each row ----
   const recordsHtml = rows.map((row, i) => {
-    const cols = columns.length ? columns : Object.keys(row).filter(k => !k.startsWith('_'))
-    const fields = cols
-      .filter(c => c.toLowerCase() !== 'source' && !String(c).startsWith('_'))
-      .map(col => {
-        const val = row[col] ?? '-'
-        const safeVal = String(val).replace(/'/g,"\\'").replace(/"/g,'&quot;')
-        return `<div class="field-row">
-          <span class="field-icon">${getEmoji(col)}</span>
-          <span class="field-key">${String(col).toUpperCase()}</span>
-          <span class="field-val">${val}
-            <button class="copy-btn" onclick="copyVal('${safeVal}')">COPY</button>
-          </span>
-        </div>`
-      }).join('')
+    const fields = columns.map(col => {
+      const val = row[col] ?? '-'
+      const safeVal = String(val).replace(/'/g, "\\'").replace(/"/g, '&quot;')
+      return `<div class="field-row">
+        <span class="field-icon">${getEmoji(col)}</span>
+        <span class="field-key">${String(col).toUpperCase()}</span>
+        <span class="field-val">${val}
+          <button class="copy-btn" onclick="copyVal('${safeVal}')">COPY</button>
+        </span>
+      </div>`
+    }).join('')
     return `<div class="record-block">
-      ${rows.length>1?`<div class="record-num">// RECORD ${i+1} OF ${rows.length}</div>`:''}
+      ${rows.length > 1
+        ? `<div class="record-num">// RECORD ${i + 1} OF ${rows.length}</div>`
+        : ''}
       ${fields}
     </div>`
   }).join('')
 
-  const label = data._queryType === 'mobile' ? 'MOBILE' : (data._queryType === 'cnic' ? 'CNIC' : 'RESULT')
+  const label = data._queryType === 'mobile'
+    ? 'MOBILE'
+    : (data._queryType === 'cnic' ? 'CNIC' : 'RESULT')
 
   div.innerHTML = `<div class="result-card">
     <div class="result-header">
@@ -502,8 +501,8 @@ async function doSearch() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        query: raw,               // ← unified field, backend accepts both
-        number: raw,              // ← legacy field, still supported
+        query: raw,
+        number: raw,
         deviceFingerprint: deviceFP
       })
     })
