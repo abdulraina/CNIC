@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Fresh SIM Tracker — CNIC Lookup</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, sans-serif;
+    background: linear-gradient(135deg, #1e3a8a 0%, #4c1d95 100%);
+    min-height: 100vh;
+    color: #1f2937;
+    padding: 24px;
+  }
+  .container {
+    max-width: 900px;
+    margin: 0 auto;
+    background: #ffffff;
+    border-radius: 16px;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+    overflow: hidden;
+  }
+  .header {
+    background: linear-gradient(135deg, #2563eb 0%, #7c3aed 100%);
+    color: white;
+    padding: 32px;
+    text-align: center;
+  }
+  .header h1 { margin: 0 0 8px; font-size: 1.8rem; }
+  .header p { margin: 0; opacity: 0.9; font-size: 0.95rem; }
+
+  .form-wrap { padding: 28px 32px 8px; }
+  .form-row {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  input[type="text"] {
+    flex: 1;
+    min-width: 220px;
+    padding: 14px 16px;
+    border: 2px solid #e5e7eb;
+    border-radius: 10px;
+    font-size: 1rem;
+    transition: border-color 0.2s, box-shadow 0.2s;
+    outline: none;
+  }
+  input[type="text"]:focus {
+    border-color: #2563eb;
+    box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.15);
+  }
+  button {
+    padding: 14px 28px;
+    border: none;
+    border-radius: 10px;
+    background: linear-gradient(135deg, #2563eb 0%, #7c3aed 100%);
+    color: white;
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: transform 0.15s, box-shadow 0.15s, opacity 0.15s;
+  }
+  button:hover:not(:disabled) {
+    transform: translateY(-1px);
+    box-shadow: 0 8px 20px rgba(37, 99, 235, 0.35);
+  }
+  button:disabled { opacity: 0.6; cursor: not-allowed; }
+
+  .status { padding: 16px 32px 0; font-size: 0.9rem; }
+  .status.error { color: #b91c1c; }
+  .status.info  { color: #1d4ed8; }
+
+  .spinner {
+    display: inline-block;
+    width: 16px; height: 16px;
+    border: 2px solid rgba(255,255,255,0.4);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    vertical-align: -3px;
+    margin-right: 8px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .results { padding: 20px 32px 32px; }
+  .card {
+    border: 1px solid #e5e7eb;
+    border-left: 4px solid #7c3aed;
+    border-radius: 10px;
+    padding: 18px 20px;
+    margin-bottom: 14px;
+    background: #fafafa;
+    transition: box-shadow 0.2s;
+  }
+  .card:hover { box-shadow: 0 6px 18px rgba(0,0,0,0.08); }
+  .row {
+    display: flex;
+    padding: 6px 0;
+    border-bottom: 1px dashed #eee;
+    font-size: 0.95rem;
+  }
+  .row:last-child { border-bottom: none; }
+  .label {
+    width: 110px;
+    font-weight: 600;
+    color: #4b5563;
+    flex-shrink: 0;
+  }
+  .value { color: #111827; word-break: break-word; }
+
+  @media (max-width: 600px) {
+    .header { padding: 22px; }
+    .header h1 { font-size: 1.4rem; }
+    .form-wrap, .results, .status { padding-left: 18px; padding-right: 18px; }
+    .label { width: 90px; font-size: 0.9rem; }
+  }
+</style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>📱 Fresh SIM Tracker</h1>
+      <p>Search SIM details by CNIC number</p>
+    </div>
+
+    <div class="form-wrap">
+      <form id="searchForm" class="form-row">
+        <input
+          type="text"
+          id="cnic"
+          name="cnic"
+          placeholder="Enter 13-digit CNIC (e.g. 4530448083059)"
+          maxlength="15"
+          autocomplete="off"
+          required
+        />
+        <button type="submit" id="submitBtn">Search</button>
+      </form>
+    </div>
+
+    <div id="status" class="status"></div>
+    <div id="results" class="results"></div>
+  </div>
+
+<script>
+  const form      = document.getElementById("searchForm");
+  const input     = document.getElementById("cnic");
+  const btn       = document.getElementById("submitBtn");
+  const statusEl  = document.getElementById("status");
+  const resultsEl = document.getElementById("results");
+
+  function setStatus(msg, type = "") {
+    statusEl.className = "status " + type;
+    statusEl.textContent = msg;
+  }
+
+  function escapeHtml(str) {
+    return String(str).replace(/[&<>"']/g, c => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+    }[c]));
+  }
+
+  function renderResults(list) {
+    if (!list.length) {
+      resultsEl.innerHTML = "";
+      return;
+    }
+    resultsEl.innerHTML = list.map((r, i) => `
+      <div class="card">
+        <div class="row"><div class="label">#</div><div class="value">${i + 1}</div></div>
+        <div class="row"><div class="label">Mobile</div><div class="value">${escapeHtml(r.mobile)}</div></div>
+        <div class="row"><div class="label">Name</div><div class="value">${escapeHtml(r.name)}</div></div>
+        <div class="row"><div class="label">CNIC</div><div class="value">${escapeHtml(r.cnic)}</div></div>
+        <div class="row"><div class="label">Address</div><div class="value">${escapeHtml(r.address)}</div></div>
+        <div class="row"><div class="label">Network</div><div class="value">${escapeHtml(r.network)}</div></div>
+      </div>
+    `).join("");
+  }
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const cnic = input.value.trim();
+
+    // Client-side quick validation
+    const digits = cnic.replace(/\D/g, "");
+    if (digits.length !== 13) {
+      setStatus("Please enter a valid 13-digit CNIC.", "error");
+      resultsEl.innerHTML = "";
+      return;
+    }
+
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span>Searching...';
+    setStatus("Querying server...", "info");
+    resultsEl.innerHTML = "";
+
+    try {
+      const res = await fetch("/api/search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cnic })
+      });
+
+      const data = await res.json();
+
+      if (!res.ok || !data.success) {
+        setStatus(data.error || `Request failed (${res.status})`, "error");
+        return;
+      }
+
+      if (data.count === 0) {
+        setStatus("No results found for this CNIC.", "error");
+        return;
+      }
+
+      setStatus(`Found ${data.count} result(s).`, "info");
+      renderResults(data.results);
+
+    } catch (err) {
+      setStatus("Network error: " + err.message, "error");
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Search";
+    }
+  });
+
+  // Allow only digits and dashes
+  input.addEventListener("input", () => {
+    input.value = input.value.replace(/[^\d-]/g, "");
+  });
+</script>
+</body>
+</html>
