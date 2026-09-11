@@ -90,6 +90,18 @@
   }
   .badge-cnic   { background: #dbeafe; color: #1e40af; }
   .badge-mobile { background: #dcfce7; color: #166534; }
+  .badge-auto   { background: #fef3c7; color: #92400e; }
+
+  .auto-note {
+    margin: 12px 32px 0;
+    padding: 10px 14px;
+    border-left: 4px solid #f59e0b;
+    background: #fffbeb;
+    color: #78350f;
+    font-size: 0.9rem;
+    border-radius: 6px;
+  }
+  .auto-note strong { color: #78350f; }
 
   .spinner {
     display: inline-block;
@@ -114,6 +126,10 @@
     transition: box-shadow 0.2s;
   }
   .card:hover { box-shadow: 0 6px 18px rgba(0,0,0,0.08); }
+  .card.primary {
+    border-left-color: #059669;
+    background: #f0fdf4;
+  }
   .row {
     display: flex;
     padding: 6px 0;
@@ -145,7 +161,8 @@
   @media (max-width: 600px) {
     .header { padding: 22px; }
     .header h1 { font-size: 1.4rem; }
-    .form-wrap, .results, .status, .hint { padding-left: 18px; padding-right: 18px; }
+    .form-wrap, .results, .status, .hint, .auto-note { padding-left: 18px; padding-right: 18px; }
+    .auto-note { margin-left: 18px; margin-right: 18px; }
     .label { width: 90px; font-size: 0.9rem; }
   }
 </style>
@@ -177,6 +194,7 @@
     </div>
 
     <div id="status" class="status"></div>
+    <div id="autoNote"></div>
     <div id="results" class="results"></div>
   </div>
 
@@ -185,11 +203,20 @@
   const input     = document.getElementById("query");
   const btn       = document.getElementById("submitBtn");
   const statusEl  = document.getElementById("status");
+  const autoNote  = document.getElementById("autoNote");
   const resultsEl = document.getElementById("results");
 
   function setStatus(html, type = "") {
     statusEl.className = "status " + type;
     statusEl.innerHTML = html;
+  }
+
+  function clearAutoNote() {
+    autoNote.innerHTML = "";
+  }
+
+  function setAutoNote(html) {
+    autoNote.innerHTML = `<div class="auto-note">${html}</div>`;
   }
 
   function escapeHtml(str) {
@@ -198,10 +225,6 @@
     }[c]));
   }
 
-  /**
-   * Client-side detection mirrored from the server.
-   * Returns "cnic" | "mobile" | "invalid".
-   */
   function detectType(raw) {
     const digits = raw.replace(/\D/g, "");
     let stripped = digits;
@@ -215,11 +238,16 @@
     return "invalid";
   }
 
-  function renderResults(list) {
+  function renderResults(list, searchedMobile) {
     if (!list.length) { resultsEl.innerHTML = ""; return; }
 
+    const normalize = s => String(s || "").replace(/\D/g, "");
+    const searched = normalize(searchedMobile);
+
     resultsEl.innerHTML = list.map((r, i) => {
-      // Network cell: logo (if available) + name (or em dash)
+      // Highlight the card that matches the searched mobile
+      const isPrimary = searched && normalize(r.mobile) === searched;
+
       let networkCell = "";
       if (r.network_image) {
         networkCell += `<img class="network-logo"
@@ -234,8 +262,8 @@
       }
 
       return `
-        <div class="card">
-          <div class="row"><div class="label">#</div><div class="value">${i + 1}</div></div>
+        <div class="card${isPrimary ? " primary" : ""}">
+          <div class="row"><div class="label">#</div><div class="value">${i + 1}${isPrimary ? ' <span class="badge badge-auto">MATCH</span>' : ""}</div></div>
           <div class="row"><div class="label">Mobile</div><div class="value">${escapeHtml(r.mobile || "—")}</div></div>
           <div class="row"><div class="label">Name</div><div class="value">${escapeHtml(r.name || "—")}</div></div>
           <div class="row"><div class="label">CNIC</div><div class="value">${escapeHtml(r.cnic || "—")}</div></div>
@@ -254,13 +282,20 @@
     if (kind === "invalid") {
       setStatus("Enter a valid 13-digit CNIC or 11-digit mobile number.", "error");
       resultsEl.innerHTML = "";
+      clearAutoNote();
       return;
     }
 
     btn.disabled = true;
     btn.innerHTML = '<span class="spinner"></span>Searching...';
-    setStatus("Querying server...", "info");
+    setStatus(
+      kind === "mobile"
+        ? "Searching mobile... (may also auto-fetch all numbers by CNIC)"
+        : "Querying server...",
+      "info"
+    );
     resultsEl.innerHTML = "";
+    clearAutoNote();
 
     try {
       const res = await fetch("/api/search", {
@@ -285,8 +320,19 @@
         return;
       }
 
+      // Summary line
       setStatus(`Found ${data.count} result(s) for <strong>${escapeHtml(data.query)}</strong> ${badge}`, "info");
-      renderResults(data.results);
+
+      // Auto-lookup notice
+      const meta = data.meta || {};
+      if (meta.auto_cnic_lookup && meta.auto_cnic) {
+        setAutoNote(
+          `ℹ️ Mobile lookup returned CNIC <strong>${escapeHtml(meta.auto_cnic)}</strong>. ` +
+          `Auto-fetched <strong>${meta.second_lookup_count}</strong> number(s) against this CNIC.`
+        );
+      }
+
+      renderResults(data.results, data.type === "mobile" ? data.query : "");
 
     } catch (err) {
       setStatus("Network error: " + escapeHtml(err.message), "error");
