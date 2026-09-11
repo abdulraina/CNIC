@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
-CNIC Lookup Web Server - Device Fingerprint Rate Limiting
+CNIC + Mobile Lookup Web Server - Device Fingerprint Rate Limiting
 Fingerprint = IP + Browser signals + Canvas hash + Screen + Timezone
 Cannot be bypassed by reconnecting internet or clearing cookies
+
+Upstream: https://freshsimtracker.com
 """
 
 from flask import Flask, request, jsonify, send_file
@@ -13,6 +15,7 @@ import time
 import os
 import hashlib
 import logging
+import re
 
 # ============================================================
 # Logging (works with Gunicorn)
@@ -23,18 +26,27 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 CORS(app)
 
-BASE_URL = "https://cnic.shop"
+# ============================================================
+# Upstream site config (freshsimtracker.com)
+# ============================================================
+BASE_URL = "https://freshsimtracker.com"
+TRACK_PATH = "/numberDetails.php"
+
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Referer": BASE_URL + "/",
     "Origin": BASE_URL,
-    "X-Requested-With": "XMLHttpRequest",
-    "Accept": "application/json, */*",
+    "Content-Type": "application/x-www-form-urlencoded",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
 }
 
 session = requests.Session()
 session.headers.update(HEADERS)
-csrf_token = None
+
+# freshsimtracker doesn't use CSRF tokens in the same way, but we still
+# warm the session once so cookies are ready.
 session_initialized = False
 
 # ============================================================
@@ -43,6 +55,7 @@ session_initialized = False
 # ============================================================
 rate_db = {}
 MAX_PER_HOUR = 10
+
 
 def check_rate_limit(fp):
     now = time.time()
@@ -57,66 +70,99 @@ def check_rate_limit(fp):
     rate_db[fp] = times
     return True, remaining - 1, 0
 
+
 # ============================================================
-# CNIC session
+# Input validation: CNIC (13 digits) OR Mobile (11 digits, starts 03)
+# ============================================================
+def detect_query_type(value: str):
+    """
+    Returns (type, cleaned_value) where type is 'cnic', 'mobile', or None.
+    - CNIC:   13 digits (optionally with dashes)
+    - Mobile: 11 digits starting with 03 (e.g., 03001234567)
+    """
+    cleaned = re.sub(r"\D", "", str(value or ""))
+    if len(cleaned) == 13:
+        return "cnic", cleaned
+    if len(cleaned) == 11 and cleaned.startswith("03"):
+        return "mobile", cleaned
+    return None, cleaned
+
+
+# ============================================================
+# Upstream session (freshsimtracker doesn't require CSRF)
 # ============================================================
 def init_cnic_session():
-    global csrf_token, session_initialized
+    global session_initialized
     try:
         resp = session.get(BASE_URL + "/", timeout=20)
-        soup = BeautifulSoup(resp.text, "html.parser")
-        meta = soup.find("meta", {"name": "csrf-token"})
-        if meta and meta.get("content"):
-            csrf_token = meta["content"]
-            session_initialized = True
-            logger.info("✅ CNIC session ready")
-            return True
-        hidden = soup.find("input", {"name": "csrf_token"})
-        if hidden and hidden.get("value"):
-            csrf_token = hidden["value"]
-            session_initialized = True
-            return True
-        return False
+        session_initialized = resp.status_code == 200
+        if session_initialized:
+            logger.info("✅ freshsimtracker session ready")
+        else:
+            logger.warning(f"⚠️  Warm-up returned HTTP {resp.status_code}")
+        return session_initialized
     except Exception as e:
         logger.error(f"❌ Session init failed: {e}")
         return False
 
-def refresh_csrf():
-    global csrf_token
-    try:
-        resp = session.get(BASE_URL + "/", timeout=15)
-        soup = BeautifulSoup(resp.text, "html.parser")
-        meta = soup.find("meta", {"name": "csrf-token"})
-        if meta and meta.get("content"):
-            csrf_token = meta["content"]
-    except:
-        pass
+
+def parse_results(html: str):
+    """
+    freshsimtracker returns an HTML table (table.table) with 5 columns:
+    Mobile | Name | CNIC | Address | Network
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    table = soup.select_one("table.table")
+
+    if not table:
+        return []
+
+    results = []
+    for row in table.select("tr"):
+        cells = [c.get_text(" ", strip=True) for c in row.select("td")]
+        if len(cells) < 5:
+            continue
+        results.append({
+            "mobile":  cells[0],
+            "name":    cells[1],
+            "cnic":    cells[2],
+            "address": cells[3],
+            "network": cells[4],
+        })
+    return results
+
 
 def do_lookup(number):
-    global csrf_token
+    """
+    POST numberCnic=<value>&searchNumber=search to /numberDetails.php
+    and parse the resulting table.
+    """
     try:
         resp = session.post(
-            BASE_URL + "/track",
-            data={"csrf_token": csrf_token, "user_input": number},
-            timeout=20
+            BASE_URL + TRACK_PATH,
+            data={"numberCnic": number, "searchNumber": "search"},
+            timeout=20,
+            allow_redirects=True,
         )
-        if resp.status_code in (400, 403) or \
-           "application/json" not in resp.headers.get("content-type", ""):
-            refresh_csrf()
-            resp = session.post(
-                BASE_URL + "/track",
-                data={"csrf_token": csrf_token, "user_input": number},
-                timeout=20
-            )
-        if "application/json" not in resp.headers.get("content-type", ""):
+
+        if resp.status_code != 200:
             return {"Error": f"Server error (HTTP {resp.status_code})"}
-        return resp.json()
+
+        results = parse_results(resp.text)
+
+        if not results:
+            return {"Error": "No record found for this CNIC/mobile number."}
+
+        # Return first match (consistent with the CLI behaviour)
+        return results[0]
+
     except requests.exceptions.Timeout:
         return {"Error": "Request timed out. Try again."}
     except requests.exceptions.ConnectionError:
         return {"Error": "Could not connect to database."}
     except Exception as e:
         return {"Error": str(e)}
+
 
 # ============================================================
 # Routes
@@ -126,6 +172,7 @@ def do_lookup(number):
 def index():
     return send_file("cnic_lookup.html")
 
+
 @app.route("/api/lookup", methods=["POST"])
 def lookup():
     data = request.get_json()
@@ -133,9 +180,19 @@ def lookup():
         return jsonify({"Error": "Missing data"}), 400
 
     device_fp = data.get("deviceFingerprint", "").strip()
-    number     = str(data.get("number", "")).strip()
-    ip         = request.headers.get("X-Forwarded-For", request.remote_addr or "")
-    ip         = ip.split(",")[0].strip()
+
+    # Accept new "query" field, plus legacy "number"/"cnic"/"mobile"
+    raw_input = (
+        data.get("query")
+        or data.get("number")
+        or data.get("cnic")
+        or data.get("mobile")
+        or ""
+    )
+    raw_input = str(raw_input).strip()
+
+    ip = request.headers.get("X-Forwarded-For", request.remote_addr or "")
+    ip = ip.split(",")[0].strip()
 
     if not device_fp:
         return jsonify({"Error": "Missing device fingerprint"}), 400
@@ -153,18 +210,31 @@ def lookup():
             "reset_in": reset_mins
         }), 429
 
-    if not number.isdigit() or not (10 <= len(number) <= 13):
-        return jsonify({"Error": "Invalid number. Must be 10–13 digits."}), 400
+    # === Validate input: 13-digit CNIC OR 11-digit mobile (03...) ===
+    qtype, number = detect_query_type(raw_input)
+
+    if qtype is None:
+        return jsonify({
+            "Error": "Invalid input. Enter a 13-digit CNIC (e.g. 4530448083059) "
+                     "or an 11-digit mobile starting with 03 (e.g. 03001234567)."
+        }), 400
 
     if not session_initialized:
         if not init_cnic_session():
             return jsonify({"Error": "Database unavailable. Try later."}), 503
 
-    logger.info(f"🔍 {number} | IP: {ip} | FP: {combined[:8]}... | Left: {remaining}")
+    logger.info(
+        f"🔍 {qtype.upper()}: {number} | IP: {ip} | FP: {combined[:8]}... | Left: {remaining}"
+    )
     result = do_lookup(number)
-    result["_remaining"] = remaining
-    result["_limit"] = MAX_PER_HOUR
+
+    # Attach metadata for frontend
+    result["_remaining"]  = remaining
+    result["_limit"]      = MAX_PER_HOUR
+    result["_queryType"]  = qtype
+    result["_queryValue"] = number
     return jsonify(result)
+
 
 @app.route("/api/status", methods=["POST"])
 def status():
@@ -189,6 +259,7 @@ def status():
         "session": session_initialized
     })
 
+
 @app.route("/admin/limits")
 def admin_limits():
     secret = request.args.get("key", "")
@@ -208,14 +279,13 @@ def admin_limits():
     now = time.time()
     hour_ago = now - 3600
 
-    # Build per-fingerprint stats
     active_users = []
     for fp, times in rate_db.items():
         recent = [t for t in times if t > hour_ago]
         if recent:
-            last_seen = int(now - max(recent))
+            last_seen  = int(now - max(recent))
             first_seen = int(now - min(recent))
-            usage_pct = int(len(recent) / MAX_PER_HOUR * 100)
+            usage_pct  = int(len(recent) / MAX_PER_HOUR * 100)
             active_users.append({
                 "fp": fp[:8] + "...",
                 "count": len(recent),
@@ -226,9 +296,9 @@ def admin_limits():
             })
 
     active_users.sort(key=lambda x: x["count"], reverse=True)
-    total_devices = len(active_users)
+    total_devices  = len(active_users)
     total_searches = sum(u["count"] for u in active_users)
-    blocked_count = sum(1 for u in active_users if u["blocked"])
+    blocked_count  = sum(1 for u in active_users if u["blocked"])
 
     def fmt_time(secs):
         if secs < 60:   return f"{secs}s ago"
@@ -284,7 +354,6 @@ def admin_limits():
 
   .wrapper{{position:relative;z-index:1;max-width:900px;margin:0 auto;padding:40px 20px 80px;}}
 
-  /* ── Header ── */
   .header{{display:flex;align-items:center;justify-content:space-between;margin-bottom:36px;flex-wrap:wrap;gap:16px;}}
   .logo{{display:flex;align-items:center;gap:10px;}}
   .logo-icon{{width:42px;height:42px;background:var(--red);border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:20px;}}
@@ -294,7 +363,6 @@ def admin_limits():
   .pulse{{width:8px;height:8px;border-radius:50%;background:var(--green);animation:pulse 2s infinite;}}
   @keyframes pulse{{0%,100%{{opacity:1;}}50%{{opacity:0.3;}}}}
 
-  /* ── Stat cards ── */
   .stats-row{{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:28px;}}
   .stat-card{{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:18px 16px;position:relative;overflow:hidden;}}
   .stat-card::before{{content:'';position:absolute;top:0;left:0;right:0;height:2px;}}
@@ -309,7 +377,6 @@ def admin_limits():
   .stat-card.blue .stat-val{{color:#4488ff;}}
   .stat-label{{font-size:11px;color:var(--muted);margin-top:4px;font-family:var(--mono);letter-spacing:1px;text-transform:uppercase;}}
 
-  /* ── Table card ── */
   .table-card{{background:var(--card);border:1px solid var(--border);border-radius:16px;overflow:hidden;}}
   .table-header{{padding:16px 20px;background:var(--surface);border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;}}
   .table-title{{font-family:var(--mono);font-size:12px;color:var(--green);letter-spacing:2px;text-transform:uppercase;}}
@@ -324,17 +391,14 @@ def admin_limits():
 
   .fp-code{{color:var(--text);letter-spacing:1px;}}
 
-  /* ── Usage bar ── */
   .bar-wrap{{height:6px;background:var(--border);border-radius:3px;width:120px;overflow:hidden;margin-bottom:4px;}}
   .bar-fill{{height:100%;border-radius:3px;transition:width 0.3s;}}
   .bar-label{{font-size:11px;color:var(--muted);}}
 
-  /* ── Badges ── */
   .badge{{font-family:var(--mono);font-size:10px;padding:3px 10px;border-radius:20px;letter-spacing:1px;}}
   .badge.active{{background:rgba(0,255,136,0.1);border:1px solid var(--green);color:var(--green);}}
   .badge.blocked{{background:rgba(255,68,102,0.1);border:1px solid var(--red);color:var(--red);}}
 
-  /* ── Info bar ── */
   .info-bar{{display:flex;align-items:center;gap:10px;padding:12px 16px;background:var(--surface);border:1px solid var(--border);border-radius:10px;margin-bottom:20px;font-family:var(--mono);font-size:12px;color:var(--muted);}}
 
   @media(max-width:600px){{
@@ -352,7 +416,7 @@ def admin_limits():
       <div class="logo-icon">🛡️</div>
       <div>
         <div class="logo-text">ADMIN PANEL</div>
-        <div class="logo-sub">// CNIC.LOOKUP Rate Monitor</div>
+        <div class="logo-sub">// FRESHSIMTRACKER Rate Monitor</div>
       </div>
     </div>
     <div class="refresh-note">
@@ -412,11 +476,10 @@ def admin_limits():
 </html>"""
     return html
 
+
 # ============================================================
 # WSGI entry point (used by Gunicorn on Render)
 # ============================================================
-# Gunicorn calls this module and looks for `app`.
-# Session is initialized here so it runs once at startup.
 init_cnic_session()
 
 # ============================================================
@@ -424,7 +487,7 @@ init_cnic_session()
 # ============================================================
 if __name__ == "__main__":
     print("=" * 50)
-    print("  CNIC Lookup — Device Fingerprint Rate Limiting")
+    print("  CNIC + Mobile Lookup — freshsimtracker.com")
     print("=" * 50)
     port = int(os.environ.get("PORT", 5000))
     admin_key = os.environ.get("ADMIN_KEY", "changeme")
