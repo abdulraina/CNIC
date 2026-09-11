@@ -35,7 +35,7 @@ _NETWORK_FILENAME_MAP = {
     "ptcl":    "PTCL",
     # The upstream site uses "Mob.png" as a generic/older icon.
     # Change this if you know it maps to a specific network.
-    "mob":     "Zong",
+    "mob":     "Moblink",
 }
 
 
