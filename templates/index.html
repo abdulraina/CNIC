@@ -127,7 +127,20 @@
     color: #4b5563;
     flex-shrink: 0;
   }
-  .value { color: #111827; word-break: break-word; }
+  .value {
+    color: #111827;
+    word-break: break-word;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .network-logo {
+    height: 24px;
+    width: auto;
+    border-radius: 3px;
+    vertical-align: middle;
+  }
 
   @media (max-width: 600px) {
     .header { padding: 22px; }
@@ -180,7 +193,7 @@
   }
 
   function escapeHtml(str) {
-    return String(str).replace(/[&<>"']/g, c => ({
+    return String(str == null ? "" : str).replace(/[&<>"']/g, c => ({
       "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
     }[c]));
   }
@@ -195,10 +208,7 @@
     if (stripped.startsWith("0092")) stripped = stripped.slice(4);
     else if (stripped.startsWith("92") && stripped.length === 12) stripped = stripped.slice(2);
 
-    // 13 digits starting with non-zero → CNIC
     if (digits.length === 13 && !digits.startsWith("0")) return "cnic";
-
-    // Mobile variants
     if (stripped.length === 11 && stripped.startsWith("03")) return "mobile";
     if (stripped.length === 10 && stripped.startsWith("3"))  return "mobile";
 
@@ -207,16 +217,33 @@
 
   function renderResults(list) {
     if (!list.length) { resultsEl.innerHTML = ""; return; }
-    resultsEl.innerHTML = list.map((r, i) => `
-      <div class="card">
-        <div class="row"><div class="label">#</div><div class="value">${i + 1}</div></div>
-        <div class="row"><div class="label">Mobile</div><div class="value">${escapeHtml(r.mobile)}</div></div>
-        <div class="row"><div class="label">Name</div><div class="value">${escapeHtml(r.name)}</div></div>
-        <div class="row"><div class="label">CNIC</div><div class="value">${escapeHtml(r.cnic)}</div></div>
-        <div class="row"><div class="label">Address</div><div class="value">${escapeHtml(r.address)}</div></div>
-        <div class="row"><div class="label">Network</div><div class="value">${escapeHtml(r.network)}</div></div>
-      </div>
-    `).join("");
+
+    resultsEl.innerHTML = list.map((r, i) => {
+      // Network cell: logo (if available) + name (or em dash)
+      let networkCell = "";
+      if (r.network_image) {
+        networkCell += `<img class="network-logo"
+                            src="${escapeHtml(r.network_image)}"
+                            alt="${escapeHtml(r.network || 'network')}"
+                            onerror="this.style.display='none'" />`;
+      }
+      if (r.network && String(r.network).trim()) {
+        networkCell += `<span>${escapeHtml(r.network)}</span>`;
+      } else if (!r.network_image) {
+        networkCell = "<span>—</span>";
+      }
+
+      return `
+        <div class="card">
+          <div class="row"><div class="label">#</div><div class="value">${i + 1}</div></div>
+          <div class="row"><div class="label">Mobile</div><div class="value">${escapeHtml(r.mobile || "—")}</div></div>
+          <div class="row"><div class="label">Name</div><div class="value">${escapeHtml(r.name || "—")}</div></div>
+          <div class="row"><div class="label">CNIC</div><div class="value">${escapeHtml(r.cnic || "—")}</div></div>
+          <div class="row"><div class="label">Address</div><div class="value">${escapeHtml(r.address || "—")}</div></div>
+          <div class="row"><div class="label">Network</div><div class="value">${networkCell}</div></div>
+        </div>
+      `;
+    }).join("");
   }
 
   form.addEventListener("submit", async (e) => {
