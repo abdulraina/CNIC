@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Fresh SIM Tracker — CNIC Lookup</title>
+<title>Fresh SIM Tracker — CNIC & Mobile Lookup</title>
 <style>
   * { box-sizing: border-box; }
   body {
@@ -39,7 +39,7 @@
   }
   input[type="text"] {
     flex: 1;
-    min-width: 220px;
+    min-width: 240px;
     padding: 14px 16px;
     border: 2px solid #e5e7eb;
     border-radius: 10px;
@@ -68,9 +68,28 @@
   }
   button:disabled { opacity: 0.6; cursor: not-allowed; }
 
+  .hint {
+    padding: 8px 32px 0;
+    font-size: 0.82rem;
+    color: #6b7280;
+  }
+
   .status { padding: 16px 32px 0; font-size: 0.9rem; }
   .status.error { color: #b91c1c; }
   .status.info  { color: #1d4ed8; }
+
+  .badge {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 999px;
+    font-size: 0.75rem;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    margin-left: 8px;
+    vertical-align: middle;
+  }
+  .badge-cnic   { background: #dbeafe; color: #1e40af; }
+  .badge-mobile { background: #dcfce7; color: #166534; }
 
   .spinner {
     display: inline-block;
@@ -113,7 +132,7 @@
   @media (max-width: 600px) {
     .header { padding: 22px; }
     .header h1 { font-size: 1.4rem; }
-    .form-wrap, .results, .status { padding-left: 18px; padding-right: 18px; }
+    .form-wrap, .results, .status, .hint { padding-left: 18px; padding-right: 18px; }
     .label { width: 90px; font-size: 0.9rem; }
   }
 </style>
@@ -122,22 +141,26 @@
   <div class="container">
     <div class="header">
       <h1>📱 Fresh SIM Tracker</h1>
-      <p>Search SIM details by CNIC number</p>
+      <p>Search SIM details by CNIC or Mobile number</p>
     </div>
 
     <div class="form-wrap">
       <form id="searchForm" class="form-row">
         <input
           type="text"
-          id="cnic"
-          name="cnic"
-          placeholder="Enter 13-digit CNIC (e.g. 4530448083059)"
-          maxlength="15"
+          id="query"
+          name="query"
+          placeholder="Enter CNIC (13 digits) or Mobile (11 digits)"
+          maxlength="20"
           autocomplete="off"
           required
         />
         <button type="submit" id="submitBtn">Search</button>
       </form>
+    </div>
+    <div class="hint">
+      Examples: <strong>4530448083059</strong> (CNIC) &nbsp;•&nbsp;
+      <strong>03001234567</strong> or <strong>+923001234567</strong> (Mobile)
     </div>
 
     <div id="status" class="status"></div>
@@ -146,14 +169,14 @@
 
 <script>
   const form      = document.getElementById("searchForm");
-  const input     = document.getElementById("cnic");
+  const input     = document.getElementById("query");
   const btn       = document.getElementById("submitBtn");
   const statusEl  = document.getElementById("status");
   const resultsEl = document.getElementById("results");
 
-  function setStatus(msg, type = "") {
+  function setStatus(html, type = "") {
     statusEl.className = "status " + type;
-    statusEl.textContent = msg;
+    statusEl.innerHTML = html;
   }
 
   function escapeHtml(str) {
@@ -162,11 +185,28 @@
     }[c]));
   }
 
+  /**
+   * Client-side detection mirrored from the server.
+   * Returns "cnic" | "mobile" | "invalid".
+   */
+  function detectType(raw) {
+    const digits = raw.replace(/\D/g, "");
+    let stripped = digits;
+    if (stripped.startsWith("0092")) stripped = stripped.slice(4);
+    else if (stripped.startsWith("92") && stripped.length === 12) stripped = stripped.slice(2);
+
+    // 13 digits starting with non-zero → CNIC
+    if (digits.length === 13 && !digits.startsWith("0")) return "cnic";
+
+    // Mobile variants
+    if (stripped.length === 11 && stripped.startsWith("03")) return "mobile";
+    if (stripped.length === 10 && stripped.startsWith("3"))  return "mobile";
+
+    return "invalid";
+  }
+
   function renderResults(list) {
-    if (!list.length) {
-      resultsEl.innerHTML = "";
-      return;
-    }
+    if (!list.length) { resultsEl.innerHTML = ""; return; }
     resultsEl.innerHTML = list.map((r, i) => `
       <div class="card">
         <div class="row"><div class="label">#</div><div class="value">${i + 1}</div></div>
@@ -181,12 +221,11 @@
 
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
-    const cnic = input.value.trim();
+    const raw = input.value.trim();
 
-    // Client-side quick validation
-    const digits = cnic.replace(/\D/g, "");
-    if (digits.length !== 13) {
-      setStatus("Please enter a valid 13-digit CNIC.", "error");
+    const kind = detectType(raw);
+    if (kind === "invalid") {
+      setStatus("Enter a valid 13-digit CNIC or 11-digit mobile number.", "error");
       resultsEl.innerHTML = "";
       return;
     }
@@ -200,35 +239,39 @@
       const res = await fetch("/api/search", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cnic })
+        body: JSON.stringify({ query: raw })
       });
 
       const data = await res.json();
 
       if (!res.ok || !data.success) {
-        setStatus(data.error || `Request failed (${res.status})`, "error");
+        setStatus(escapeHtml(data.error || `Request failed (${res.status})`), "error");
         return;
       }
+
+      const badge = data.type === "cnic"
+        ? '<span class="badge badge-cnic">CNIC</span>'
+        : '<span class="badge badge-mobile">MOBILE</span>';
 
       if (data.count === 0) {
-        setStatus("No results found for this CNIC.", "error");
+        setStatus(`No results found for this ${data.type.toUpperCase()}. ${badge}`, "error");
         return;
       }
 
-      setStatus(`Found ${data.count} result(s).`, "info");
+      setStatus(`Found ${data.count} result(s) for <strong>${escapeHtml(data.query)}</strong> ${badge}`, "info");
       renderResults(data.results);
 
     } catch (err) {
-      setStatus("Network error: " + err.message, "error");
+      setStatus("Network error: " + escapeHtml(err.message), "error");
     } finally {
       btn.disabled = false;
       btn.textContent = "Search";
     }
   });
 
-  // Allow only digits and dashes
+  // Allow only digits, dashes, plus, and spaces
   input.addEventListener("input", () => {
-    input.value = input.value.replace(/[^\d-]/g, "");
+    input.value = input.value.replace(/[^\d+\-\s]/g, "");
   });
 </script>
 </body>
