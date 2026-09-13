@@ -1,12 +1,26 @@
 import os
 import re
+import time
+import json
+import hashlib
+import threading
+import logging
+from pathlib import Path
+
 from flask import Flask, request, jsonify, render_template
 from flask_cors import CORS
 import requests
 from bs4 import BeautifulSoup
 
-app = Flask(__name__)
-CORS(app)
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+ALLOWED_ORIGIN   = os.environ.get("ALLOWED_ORIGIN", "https://rainaxsimdbpk.onrender.com")
+SEARCH_LIMIT     = int(os.environ.get("SEARCH_LIMIT", "10"))       # per window
+WINDOW_SECONDS   = int(os.environ.get("WINDOW_SECONDS", "3600"))   # 1 hour
+MAX_BODY_BYTES   = int(os.environ.get("MAX_BODY_BYTES", "4096"))
+STORE_PATH       = Path(os.environ.get("STORE_PATH", "/tmp/ratelimit_store.json"))
 
 BASE_URL  = "https://freshsimtracker.com/numberDetails.php"
 BASE_SITE = "https://freshsimtracker.com"
@@ -18,6 +32,151 @@ HEADERS = {
                     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Content-Type": "application/x-www-form-urlencoded",
 }
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+log = logging.getLogger("simtracker")
+
+app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = MAX_BODY_BYTES
+
+CORS(
+    app,
+    resources={r"/api/*": {"origins": [ALLOWED_ORIGIN]}},
+    supports_credentials=False,
+    allow_headers=["Content-Type", "X-Client-Id"],
+    methods=["POST", "GET", "OPTIONS"],
+)
+
+
+# ---------------------------------------------------------------------------
+# Security headers
+# ---------------------------------------------------------------------------
+
+@app.after_request
+def _add_security_headers(resp):
+    resp.headers["X-Frame-Options"]            = "DENY"
+    resp.headers["X-Content-Type-Options"]     = "nosniff"
+    resp.headers["Referrer-Policy"]            = "no-referrer"
+    resp.headers["Permissions-Policy"]         = "geolocation=(), microphone=(), camera=()"
+    resp.headers["Cross-Origin-Opener-Policy"] = "same-origin"
+    return resp
+
+
+# ---------------------------------------------------------------------------
+# Origin guard
+# ---------------------------------------------------------------------------
+
+def _origin_ok() -> bool:
+    origin  = (request.headers.get("Origin")  or "").rstrip("/")
+    referer = (request.headers.get("Referer") or "").rstrip("/")
+
+    if origin == ALLOWED_ORIGIN.rstrip("/"):
+        return True
+    if referer.startswith(ALLOWED_ORIGIN.rstrip("/")):
+        return True
+
+    host = (request.host_url or "").rstrip("/")
+    if host and (origin == host or referer.startswith(host)):
+        return True
+
+    return False
+
+
+@app.before_request
+def _guard_api():
+    if not request.path.startswith("/api/"):
+        return None
+
+    if request.content_length and request.content_length > MAX_BODY_BYTES:
+        return jsonify({"success": False, "error": "Payload too large."}), 413
+
+    if not _origin_ok():
+        log.warning("Blocked request origin=%r referer=%r ip=%s",
+                    request.headers.get("Origin"),
+                    request.headers.get("Referer"),
+                    _client_ip())
+        return jsonify({"success": False, "error": "Forbidden origin."}), 403
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Device fingerprint + rate limiting
+# ---------------------------------------------------------------------------
+
+_store_lock = threading.Lock()
+_store_cache = None
+
+
+def _client_ip() -> str:
+    xff = request.headers.get("X-Forwarded-For", "")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.remote_addr or "0.0.0.0"
+
+
+def _load_store() -> dict:
+    global _store_cache
+    if _store_cache is not None:
+        return _store_cache
+    try:
+        if STORE_PATH.exists():
+            with STORE_PATH.open("r", encoding="utf-8") as f:
+                _store_cache = json.load(f)
+        else:
+            _store_cache = {}
+    except Exception:
+        _store_cache = {}
+    return _store_cache
+
+
+def _save_store():
+    try:
+        STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = STORE_PATH.with_suffix(".tmp")
+        with tmp.open("w", encoding="utf-8") as f:
+            json.dump(_store_cache, f)
+        tmp.replace(STORE_PATH)
+    except Exception as e:
+        log.warning("Failed to persist rate-limit store: %s", e)
+
+
+def _device_fingerprint() -> str:
+    client_id = (request.headers.get("X-Client-Id") or "").strip()[:128]
+    ua        = (request.headers.get("User-Agent") or "").strip()[:256]
+    lang      = (request.headers.get("Accept-Language") or "").strip()[:64]
+    ip        = _client_ip()
+
+    raw = f"{client_id}|{ua}|{lang}|{ip}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+
+
+def _check_and_increment(fp: str):
+    now = int(time.time())
+
+    with _store_lock:
+        store = _load_store()
+        entry = store.get(fp)
+
+        if not entry or now - entry.get("start", 0) >= WINDOW_SECONDS:
+            entry = {"start": now, "count": 0}
+            store[fp] = entry
+
+        used = entry["count"]
+
+        if used >= SEARCH_LIMIT:
+            reset_in = WINDOW_SECONDS - (now - entry["start"])
+            return False, 0, max(reset_in, 0), used
+
+        entry["count"] = used + 1
+        _save_store()
+
+        remaining = SEARCH_LIMIT - entry["count"]
+        reset_in  = WINDOW_SECONDS - (now - entry["start"])
+        return True, remaining, max(reset_in, 0), entry["count"]
 
 
 # ---------------------------------------------------------------------------
@@ -166,13 +325,10 @@ def parse_results(html: str):
 
 
 # ---------------------------------------------------------------------------
-# Upstream lookup
+# Upstream + merge
 # ---------------------------------------------------------------------------
 
 def _fetch_upstream(query_value: str):
-    """
-    POST to upstream and return parsed results (or raise).
-    """
     resp = requests.post(
         BASE_URL,
         headers=HEADERS,
@@ -184,31 +340,21 @@ def _fetch_upstream(query_value: str):
 
 
 def _pick_cnic_from_results(results, searched_mobile: str = "") -> str:
-    """
-    Find a valid 13-digit CNIC from the results.
-    Prefers the row whose mobile matches the searched number.
-    """
     searched = normalize_mobile(searched_mobile) if searched_mobile else ""
-
-    # 1. Try the row that matches the searched mobile
     if searched:
         for r in results:
             if normalize_mobile(r.get("mobile", "")) == searched:
                 c = normalize_cnic(r.get("cnic", ""))
                 if len(c) == 13:
                     return c
-
-    # 2. Otherwise, first valid CNIC in the list
     for r in results:
         c = normalize_cnic(r.get("cnic", ""))
         if len(c) == 13:
             return c
-
     return ""
 
 
 def _dedupe(results):
-    """Deduplicate by (normalized mobile, normalized cnic). Preserves order."""
     seen = set()
     out = []
     for r in results:
@@ -222,18 +368,12 @@ def _dedupe(results):
 
 
 def _merge_mobile_then_cnic(mobile_results, cnic_results, searched_mobile):
-    """
-    Put the row matching the searched mobile first, then all mobile-lookup rows,
-    then all CNIC-lookup rows. Deduplicate.
-    """
     searched = normalize_mobile(searched_mobile)
     prioritized = [r for r in mobile_results
                    if normalize_mobile(r.get("mobile", "")) == searched]
     rest_mobile = [r for r in mobile_results
                    if normalize_mobile(r.get("mobile", "")) != searched]
-
-    merged = prioritized + rest_mobile + cnic_results
-    return _dedupe(merged)
+    return _dedupe(prioritized + rest_mobile + cnic_results)
 
 
 # ---------------------------------------------------------------------------
@@ -245,8 +385,49 @@ def index():
     return render_template("index.html")
 
 
+@app.route("/api/quota", methods=["GET"])
+def quota():
+    fp = _device_fingerprint()
+    now = int(time.time())
+
+    with _store_lock:
+        store = _load_store()
+        entry = store.get(fp)
+        if not entry or now - entry.get("start", 0) >= WINDOW_SECONDS:
+            used = 0
+            reset_in = WINDOW_SECONDS
+        else:
+            used = entry.get("count", 0)
+            reset_in = max(WINDOW_SECONDS - (now - entry["start"]), 0)
+
+    remaining = max(SEARCH_LIMIT - used, 0)
+    return jsonify({
+        "success": True,
+        "limit": SEARCH_LIMIT,
+        "used": used,
+        "remaining": remaining,
+        "reset_in": reset_in,
+        "window_seconds": WINDOW_SECONDS,
+    })
+
+
 @app.route("/api/search", methods=["POST", "GET"])
 def search():
+    fp = _device_fingerprint()
+    allowed, remaining, reset_in, used = _check_and_increment(fp)
+
+    if not allowed:
+        log.info("Rate limit hit fp=%s used=%s", fp[:8] + "...", used)
+        return jsonify({
+            "success": False,
+            "error": f"Search limit reached ({SEARCH_LIMIT} per hour). "
+                     f"Try again in ~{max(reset_in // 60, 1)} min.",
+            "limit": SEARCH_LIMIT,
+            "used": used,
+            "remaining": 0,
+            "reset_in": reset_in,
+        }), 429
+
     if request.is_json:
         data = request.get_json(silent=True) or {}
     else:
@@ -265,6 +446,9 @@ def search():
             "success": False,
             "error": "Please enter a CNIC (13 digits) or mobile number (11 digits)."
         }), 400
+
+    if len(raw) > 40:
+        return jsonify({"success": False, "error": "Input too long."}), 400
 
     kind = detect_input_type(raw)
 
@@ -290,13 +474,13 @@ def search():
             "error": "Unrecognized input. Enter a 13-digit CNIC or 11-digit mobile number."
         }), 400
 
-    # ---- First lookup -----------------------------------------------------
     try:
         first_results = _fetch_upstream(query_value)
     except requests.RequestException as e:
+        log.warning("Upstream error: %s", e)
         return jsonify({
             "success": False,
-            "error": f"Upstream request failed: {str(e)}"
+            "error": "Upstream request failed. Try again shortly."
         }), 502
 
     meta = {
@@ -309,24 +493,20 @@ def search():
 
     final_results = first_results
 
-    # ---- Second lookup (only when searching a mobile) ---------------------
     if query_type == "mobile" and first_results:
         discovered_cnic = _pick_cnic_from_results(first_results, searched_mobile=query_value)
-
         if discovered_cnic:
             meta["auto_cnic"] = discovered_cnic
             try:
                 cnic_results = _fetch_upstream(discovered_cnic)
                 meta["auto_cnic_lookup"] = True
                 meta["second_lookup_count"] = len(cnic_results)
-
                 final_results = _merge_mobile_then_cnic(
                     mobile_results=first_results,
                     cnic_results=cnic_results,
                     searched_mobile=query_value,
                 )
             except requests.RequestException:
-                # Second lookup failed → silently fall back to first results
                 pass
 
     if not final_results:
@@ -337,8 +517,12 @@ def search():
             "type": query_type,
             "results": [],
             "meta": meta,
+            "quota": {"limit": SEARCH_LIMIT, "remaining": remaining, "reset_in": reset_in},
             "message": f"No results found for this {query_type.upper()}.",
         })
+
+    log.info("Search ok fp=%s type=%s count=%s remaining=%s",
+             fp[:8] + "...", query_type, len(final_results), remaining)
 
     return jsonify({
         "success": True,
@@ -347,6 +531,7 @@ def search():
         "type": query_type,
         "results": final_results,
         "meta": meta,
+        "quota": {"limit": SEARCH_LIMIT, "remaining": remaining, "reset_in": reset_in},
     })
 
 
