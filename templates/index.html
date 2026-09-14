@@ -118,6 +118,32 @@
   @keyframes spin { to { transform: rotate(360deg); } }
 
   .results { padding: 20px 32px 32px; }
+
+  /* Toolbar (PDF / print) */
+  .results-toolbar {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    margin-bottom: 14px;
+    flex-wrap: wrap;
+  }
+  .btn-secondary {
+    background: #ffffff;
+    color: #1e40af;
+    border: 2px solid #1e40af;
+    padding: 10px 18px;
+    border-radius: 10px;
+    font-weight: 600;
+    font-size: 0.9rem;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    transition: background 0.15s, transform 0.15s;
+  }
+  .btn-secondary:hover { background: #eef2ff; transform: translateY(-1px); }
+  .btn-secondary svg { width: 16px; height: 16px; }
+
   .card {
     border: 1px solid #e5e7eb;
     border-left: 4px solid #7c3aed;
@@ -126,6 +152,8 @@
     margin-bottom: 14px;
     background: #fafafa;
     transition: box-shadow 0.2s;
+    break-inside: avoid;         /* keep a card from splitting across pages */
+    page-break-inside: avoid;    /* legacy */
   }
   .card:hover { box-shadow: 0 6px 18px rgba(0,0,0,0.08); }
   .card.primary { border-left-color: #059669; background: #f0fdf4; }
@@ -155,6 +183,70 @@
     }
     .auto-note, .quota { margin-left: 18px; margin-right: 18px; }
     .label { width: 90px; font-size: 0.9rem; }
+  }
+
+  /* ------------------------------------------------------------------
+     PRINT / PDF STYLES
+     Applied only when the user prints or chooses "Save as PDF".
+     ------------------------------------------------------------------ */
+  @media print {
+    @page {
+      size: A4;
+      margin: 14mm 12mm;
+    }
+
+    /* Reset page background, drop shadows, remove buttons */
+    html, body {
+      background: #ffffff !important;
+      padding: 0 !important;
+      margin: 0 !important;
+      color: #000;
+      -webkit-print-color-adjust: exact;
+              print-color-adjust: exact;
+    }
+    .container {
+      box-shadow: none !important;
+      border-radius: 0 !important;
+      max-width: 100% !important;
+      margin: 0 !important;
+    }
+    .header {
+      background: #1e40af !important;
+      color: #ffffff !important;
+      padding: 16px !important;
+      -webkit-print-color-adjust: exact;
+              print-color-adjust: exact;
+    }
+    .header h1 { font-size: 1.3rem; margin: 0 0 4px; }
+    .header p  { font-size: 0.8rem; }
+
+    /* Hide everything interactive */
+    .form-wrap,
+    .hint,
+    .status,
+    .quota,
+    #autoNote,
+    .results-toolbar { display: none !important; }
+
+    /* Ensure results fill the page */
+    .results { padding: 12px 0 0 !important; }
+
+    .card {
+      border: 1px solid #cccccc;
+      background: #fafafa !important;
+      padding: 12px 14px;
+      margin-bottom: 10px;
+      box-shadow: none !important;
+      -webkit-print-color-adjust: exact;
+              print-color-adjust: exact;
+    }
+    .card.primary { background: #f0fdf4 !important; }
+    .row { font-size: 12px; padding: 4px 0; }
+    .label { width: 90px; font-size: 12px; }
+    .value { font-size: 12px; }
+    .network-logo { height: 18px; }
+
+    .badge { font-size: 10px; padding: 1px 6px; }
   }
 </style>
 </head>
@@ -187,42 +279,90 @@
     <div id="quotaBox" class="quota" style="display:none;"></div>
     <div id="status" class="status"></div>
     <div id="autoNote"></div>
-    <div id="results" class="results"></div>
+
+    <div class="results" id="resultsWrap">
+      <div id="resultsToolbar" class="results-toolbar" style="display:none;">
+        <button type="button" id="downloadPdfBtn" class="btn-secondary" title="Save results as PDF">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="7 10 12 15 17 10"/>
+            <line x1="12" y1="15" x2="12" y2="3"/>
+          </svg>
+          Save as PDF
+        </button>
+      </div>
+      <div id="results"></div>
+    </div>
   </div>
 
 <script>
   // -------------------------------------------------------------------------
-  //  Persistent client ID (device fingerprint component)
+  //  JS Fingerprint
   // -------------------------------------------------------------------------
-  const CLIENT_ID_KEY = "simtracker_client_id";
+  function computeFingerprint() {
+    const parts = [];
+    parts.push(`scr:${screen.width}x${screen.height}x${screen.colorDepth}`);
+    parts.push(`dpr:${window.devicePixelRatio || 1}`);
+    parts.push(`tz:${Intl.DateTimeFormat().resolvedOptions().timeZone || "?"}`);
+    parts.push(`lang:${navigator.language || "?"}`);
+    parts.push(`langs:${(navigator.languages || []).join(",")}`);
+    parts.push(`cores:${navigator.hardwareConcurrency || "?"}`);
+    parts.push(`mem:${navigator.deviceMemory || "?"}`);
+    parts.push(`touch:${(navigator.maxTouchPoints || 0)}`);
+    parts.push(`plat:${navigator.platform || "?"}`);
 
-  function getClientId() {
     try {
-      let id = localStorage.getItem(CLIENT_ID_KEY);
-      if (!id) {
-        const buf = new Uint8Array(16);
-        crypto.getRandomValues(buf);
-        id = Array.from(buf).map(b => b.toString(16).padStart(2, "0")).join("");
-        localStorage.setItem(CLIENT_ID_KEY, id);
+      const c = document.createElement("canvas");
+      c.width = 220; c.height = 40;
+      const ctx = c.getContext("2d");
+      if (ctx) {
+        ctx.textBaseline = "top";
+        ctx.font = "16px 'Arial'";
+        ctx.fillStyle = "#f60"; ctx.fillRect(0, 0, 220, 40);
+        ctx.fillStyle = "#069"; ctx.fillText("Fingerprint!", 4, 8);
+        ctx.fillStyle = "rgba(102, 204, 0, 0.7)";
+        ctx.fillText("Fingerprint!", 6, 20);
+        parts.push(`canvas:${c.toDataURL().slice(-64)}`);
       }
-      return id;
-    } catch {
-      return "anon-" + Math.random().toString(36).slice(2) + Date.now();
+    } catch { parts.push("canvas:err"); }
+
+    try {
+      const c = document.createElement("canvas");
+      const gl = c.getContext("webgl") || c.getContext("experimental-webgl");
+      if (gl) {
+        const dbg = gl.getExtension("WEBGL_debug_renderer_info");
+        if (dbg) {
+          parts.push(`gpu:${gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL)}|${gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)}`);
+        } else {
+          parts.push(`gpu:${gl.getParameter(gl.VENDOR)}|${gl.getParameter(gl.RENDERER)}`);
+        }
+      }
+    } catch { parts.push("gpu:err"); }
+
+    let h = 0x811c9dc5;
+    const str = parts.join("||");
+    for (let i = 0; i < str.length; i++) {
+      h ^= str.charCodeAt(i);
+      h = (h * 0x01000193) >>> 0;
     }
+    return "fp_" + h.toString(16).padStart(8, "0") + "_" + str.length.toString(16);
   }
 
-  const CLIENT_ID = getClientId();
+  const FINGERPRINT = computeFingerprint();
 
   // -------------------------------------------------------------------------
   //  DOM
   // -------------------------------------------------------------------------
-  const form      = document.getElementById("searchForm");
-  const input     = document.getElementById("query");
-  const btn       = document.getElementById("submitBtn");
-  const statusEl  = document.getElementById("status");
-  const autoNote  = document.getElementById("autoNote");
-  const resultsEl = document.getElementById("results");
-  const quotaBox  = document.getElementById("quotaBox");
+  const form          = document.getElementById("searchForm");
+  const input         = document.getElementById("query");
+  const btn           = document.getElementById("submitBtn");
+  const statusEl      = document.getElementById("status");
+  const autoNote      = document.getElementById("autoNote");
+  const resultsEl     = document.getElementById("results");
+  const quotaBox      = document.getElementById("quotaBox");
+  const toolbar       = document.getElementById("resultsToolbar");
+  const downloadBtn   = document.getElementById("downloadPdfBtn");
 
   function setStatus(html, type = "") {
     statusEl.className = "status " + type;
@@ -236,6 +376,9 @@
     return String(str == null ? "" : str).replace(/[&<>"']/g, c => ({
       "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
     }[c]));
+  }
+  function showToolbar(show) {
+    toolbar.style.display = show ? "flex" : "none";
   }
 
   function humanizeReset(seconds) {
@@ -268,12 +411,28 @@
     return "invalid";
   }
 
-  function renderResults(list, searchedMobile) {
-    if (!list.length) { resultsEl.innerHTML = ""; return; }
+  // Track current query so we can name the PDF meaningfully
+  let CURRENT_QUERY = "";
+
+  function renderResults(list, searchedMobile, queryForPdf) {
+    if (!list.length) { resultsEl.innerHTML = ""; showToolbar(false); return; }
     const normalize = s => String(s || "").replace(/\D/g, "");
     const searched = normalize(searchedMobile);
 
-    resultsEl.innerHTML = list.map((r, i) => {
+    CURRENT_QUERY = queryForPdf || "";
+
+    // Print-only header (page title) — hidden on screen, visible in PDF
+    const printHeader = `
+      <div class="print-only" style="display:none;">
+        <h2 style="margin:0 0 4px;font-size:16px;">Fresh SIM Tracker — Search Report</h2>
+        <p style="margin:0 0 12px;font-size:12px;color:#555;">
+          Query: <strong>${escapeHtml(CURRENT_QUERY)}</strong> &nbsp;•&nbsp;
+          Generated: ${new Date().toLocaleString()}
+        </p>
+      </div>
+    `;
+
+    resultsEl.innerHTML = printHeader + list.map((r, i) => {
       const isPrimary = searched && normalize(r.mobile) === searched;
 
       let networkCell = "";
@@ -300,6 +459,8 @@
         </div>
       `;
     }).join("");
+
+    showToolbar(true);
   }
 
   // -------------------------------------------------------------------------
@@ -309,7 +470,8 @@
     try {
       const r = await fetch("/api/quota", {
         method: "GET",
-        headers: { "X-Client-Id": CLIENT_ID }
+        credentials: "include",
+        headers: { "X-Fingerprint": FINGERPRINT }
       });
       if (!r.ok) return;
       const q = await r.json();
@@ -331,6 +493,7 @@
       setStatus("Enter a valid 13-digit CNIC or 11-digit mobile number.", "error");
       resultsEl.innerHTML = "";
       clearAutoNote();
+      showToolbar(false);
       return;
     }
 
@@ -344,20 +507,21 @@
     );
     resultsEl.innerHTML = "";
     clearAutoNote();
+    showToolbar(false);
 
     try {
       const res = await fetch("/api/search", {
         method: "POST",
+        credentials: "include",
         headers: {
           "Content-Type": "application/json",
-          "X-Client-Id": CLIENT_ID
+          "X-Fingerprint": FINGERPRINT
         },
         body: JSON.stringify({ query: raw })
       });
 
       const data = await res.json();
 
-      // Quota updates even on errors
       if (data.quota) setQuota(data.quota);
 
       if (res.status === 429) {
@@ -393,7 +557,11 @@
         );
       }
 
-      renderResults(data.results, data.type === "mobile" ? data.query : "");
+      renderResults(
+        data.results,
+        data.type === "mobile" ? data.query : "",
+        data.query || raw
+      );
 
     } catch (err) {
       setStatus("Network error: " + escapeHtml(err.message), "error");
@@ -403,9 +571,33 @@
     }
   });
 
-  // Allow only digits, dashes, plus, and spaces
   input.addEventListener("input", () => {
     input.value = input.value.replace(/[^\d+\-\s]/g, "");
+  });
+
+  // -------------------------------------------------------------------------
+  //  Save as PDF — uses the browser's native print engine
+  // -------------------------------------------------------------------------
+  downloadBtn.addEventListener("click", () => {
+    // Set the document title temporarily so the PDF filename is meaningful.
+    const originalTitle = document.title;
+    const safeQuery = CURRENT_QUERY.replace(/[^\w\-]/g, "_") || "results";
+    document.title = `FreshSIM_${safeQuery}`;
+
+    // Show the print-only header (it's hidden on screen via inline style)
+    const printHeader = document.querySelector(".print-only");
+    if (printHeader) printHeader.style.display = "block";
+
+    // Give the browser a tick to update the DOM before invoking print
+    setTimeout(() => {
+      window.print();
+
+      // Restore after the dialog closes
+      setTimeout(() => {
+        document.title = originalTitle;
+        if (printHeader) printHeader.style.display = "none";
+      }, 500);
+    }, 50);
   });
 </script>
 </body>
