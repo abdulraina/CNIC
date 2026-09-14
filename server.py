@@ -5,9 +5,10 @@ import json
 import hashlib
 import threading
 import logging
+import secrets
 from pathlib import Path
 
-from flask import Flask, request, jsonify, render_template
+from flask import Flask, request, jsonify, render_template, make_response
 from flask_cors import CORS
 import requests
 from bs4 import BeautifulSoup
@@ -17,10 +18,12 @@ from bs4 import BeautifulSoup
 # ---------------------------------------------------------------------------
 
 ALLOWED_ORIGIN   = os.environ.get("ALLOWED_ORIGIN", "https://rainaxsimdbpk.onrender.com")
-SEARCH_LIMIT     = int(os.environ.get("SEARCH_LIMIT", "10"))       # per window
-WINDOW_SECONDS   = int(os.environ.get("WINDOW_SECONDS", "3600"))   # 1 hour
+SEARCH_LIMIT     = int(os.environ.get("SEARCH_LIMIT", "10"))
+WINDOW_SECONDS   = int(os.environ.get("WINDOW_SECONDS", "3600"))
 MAX_BODY_BYTES   = int(os.environ.get("MAX_BODY_BYTES", "4096"))
 STORE_PATH       = Path(os.environ.get("STORE_PATH", "/tmp/ratelimit_store.json"))
+COOKIE_NAME      = "rnx_did"
+COOKIE_MAX_AGE   = 60 * 60 * 24 * 365   # 1 year
 
 BASE_URL  = "https://freshsimtracker.com/numberDetails.php"
 BASE_SITE = "https://freshsimtracker.com"
@@ -44,10 +47,12 @@ app.config["MAX_CONTENT_LENGTH"] = MAX_BODY_BYTES
 
 CORS(
     app,
-    resources={r"/api/*": {"origins": [ALLOWED_ORIGIN]}},
-    supports_credentials=False,
-    allow_headers=["Content-Type", "X-Client-Id"],
-    methods=["POST", "GET", "OPTIONS"],
+    resources={r"/api/*": {
+        "origins": [ALLOWED_ORIGIN],
+        "allow_headers": ["Content-Type", "X-Fingerprint"],
+        "methods": ["POST", "GET", "OPTIONS"],
+        "supports_credentials": True,
+    }},
 )
 
 
@@ -94,7 +99,7 @@ def _guard_api():
         return jsonify({"success": False, "error": "Payload too large."}), 413
 
     if not _origin_ok():
-        log.warning("Blocked request origin=%r referer=%r ip=%s",
+        log.warning("Blocked origin=%r referer=%r ip=%s",
                     request.headers.get("Origin"),
                     request.headers.get("Referer"),
                     _client_ip())
@@ -104,7 +109,35 @@ def _guard_api():
 
 
 # ---------------------------------------------------------------------------
-# Device fingerprint + rate limiting
+# Persistent device cookie
+# ---------------------------------------------------------------------------
+
+def _ensure_device_cookie() -> str:
+    existing = request.cookies.get(COOKIE_NAME)
+    if existing and re.fullmatch(r"[a-f0-9]{32}", existing):
+        return existing
+
+    new_id = secrets.token_hex(16)
+    request.environ["_new_device_cookie"] = new_id
+    return new_id
+
+
+def _maybe_set_cookie(resp):
+    new_id = request.environ.get("_new_device_cookie")
+    if new_id:
+        resp.set_cookie(
+            COOKIE_NAME,
+            new_id,
+            max_age=COOKIE_MAX_AGE,
+            httponly=True,
+            secure=True,
+            samesite="Lax",
+            path="/",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Store + rate limiting
 # ---------------------------------------------------------------------------
 
 _store_lock = threading.Lock()
@@ -144,39 +177,60 @@ def _save_store():
         log.warning("Failed to persist rate-limit store: %s", e)
 
 
-def _device_fingerprint() -> str:
-    client_id = (request.headers.get("X-Client-Id") or "").strip()[:128]
-    ua        = (request.headers.get("User-Agent") or "").strip()[:256]
-    lang      = (request.headers.get("Accept-Language") or "").strip()[:64]
-    ip        = _client_ip()
+def _bucket_keys(cookie_id: str) -> list:
+    ip    = _client_ip()
+    ua    = (request.headers.get("User-Agent") or "").strip()[:256]
+    lang  = (request.headers.get("Accept-Language") or "").strip()[:64]
+    fpjs  = (request.headers.get("X-Fingerprint") or "").strip()[:128]
 
-    raw = f"{client_id}|{ua}|{lang}|{ip}"
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+    keys = []
+    keys.append("c:" + hashlib.sha256(cookie_id.encode()).hexdigest()[:24])
+    if fpjs:
+        keys.append("f:" + hashlib.sha256(fpjs.encode()).hexdigest()[:24])
+    keys.append("i:" + hashlib.sha256(f"{ip}|{ua}|{lang}".encode()).hexdigest()[:24])
+
+    seen = set()
+    out = []
+    for k in keys:
+        if k not in seen:
+            seen.add(k)
+            out.append(k)
+    return out
 
 
-def _check_and_increment(fp: str):
+def _check_all_buckets(keys: list):
     now = int(time.time())
 
     with _store_lock:
         store = _load_store()
-        entry = store.get(fp)
+        worst_remaining = None
+        worst_reset_in  = 0
+        worst_used      = 0
 
-        if not entry or now - entry.get("start", 0) >= WINDOW_SECONDS:
-            entry = {"start": now, "count": 0}
-            store[fp] = entry
+        for k in keys:
+            entry = store.get(k)
+            if not entry or now - entry.get("start", 0) >= WINDOW_SECONDS:
+                entry = {"start": now, "count": 0}
+                store[k] = entry
 
-        used = entry["count"]
+            used     = entry["count"]
+            reset_in = max(WINDOW_SECONDS - (now - entry["start"]), 0)
+            remain   = max(SEARCH_LIMIT - used, 0)
 
-        if used >= SEARCH_LIMIT:
-            reset_in = WINDOW_SECONDS - (now - entry["start"])
-            return False, 0, max(reset_in, 0), used
+            if worst_remaining is None or remain < worst_remaining:
+                worst_remaining = remain
+                worst_reset_in  = reset_in
+                worst_used      = used
 
-        entry["count"] = used + 1
+            if used >= SEARCH_LIMIT:
+                _save_store()
+                return False, 0, reset_in, used
+
+        for k in keys:
+            store[k]["count"] += 1
         _save_store()
 
-        remaining = SEARCH_LIMIT - entry["count"]
-        reset_in  = WINDOW_SECONDS - (now - entry["start"])
-        return True, remaining, max(reset_in, 0), entry["count"]
+        return True, max(worst_remaining - 1, 0), worst_reset_in, worst_used + 1
 
 
 # ---------------------------------------------------------------------------
@@ -241,51 +295,85 @@ def _cell_text(td):
 
 
 # ---------------------------------------------------------------------------
-# Input validation
+# Input normalization
+#
+# IMPORTANT: the upstream site expects mobiles in the form 3XXXXXXXXX
+# (10 digits, no leading 0, no +92). We accept anything the user types,
+# then convert before sending upstream.
 # ---------------------------------------------------------------------------
 
 def normalize_cnic(value: str) -> str:
+    """Return 13-digit CNIC (no separators)."""
     return re.sub(r"\D", "", value or "")
 
 
-def normalize_mobile(value: str) -> str:
+def normalize_mobile_for_upstream(value: str) -> str:
+    """
+    Return mobile in '3XXXXXXXXX' form (10 digits) as the upstream expects.
+
+    Accepts:
+      03452389277       → 3452389277
+      3452389277        → 3452389277
+      +923452389277     → 3452389277
+      00923452389277    → 3452389277
+      923452389277      → 3452389277
+      92 345 2389277    → 3452389277
+      0345-238-9277     → 3452389277
+    """
     digits = re.sub(r"\D", "", value or "")
+
+    # Strip country code
     if digits.startswith("0092"):
         digits = digits[4:]
-    elif digits.startswith("92") and len(digits) == 12:
+    elif digits.startswith("92") and len(digits) >= 12:
         digits = digits[2:]
-    if len(digits) == 10 and digits.startswith("3"):
-        digits = "0" + digits
-    return digits
+
+    # Strip leading 0 (local format)
+    if digits.startswith("0"):
+        digits = digits[1:]
+
+    return digits   # e.g. "3452389277"
+
+
+def normalize_mobile_display(value: str) -> str:
+    """
+    Return mobile in '03XXXXXXXXX' form for display in error messages.
+    """
+    m = normalize_mobile_for_upstream(value)
+    if len(m) == 10 and m.startswith("3"):
+        return "0" + m
+    return m
+
+
+def is_valid_mobile(value: str) -> bool:
+    m = normalize_mobile_for_upstream(value)
+    if len(m) != 10 or not m.startswith("3"):
+        return False
+    # Pakistani mobile third digit must be 0-4
+    return m[1] in "01234"
 
 
 def is_valid_cnic(value: str) -> bool:
     return len(normalize_cnic(value)) == 13
 
 
-def is_valid_mobile(value: str) -> bool:
-    m = normalize_mobile(value)
-    if len(m) != 11 or not m.startswith("03"):
-        return False
-    return m[2] in "01234"
-
-
 def detect_input_type(raw: str) -> str:
+    """
+    Return 'cnic' | 'mobile' | 'invalid'.
+    Prefers CNIC only when input has 13 digits and doesn't start with 0/3.
+    """
     digits = re.sub(r"\D", "", raw or "")
-    stripped = digits
-    if stripped.startswith("0092"):
-        stripped = stripped[4:]
-    elif stripped.startswith("92") and len(stripped) == 12:
-        stripped = stripped[2:]
 
+    # 13 digits starting with non-zero, non-3 → CNIC
     if len(digits) == 13 and not digits.startswith("0"):
+        # A Pakistani mobile after stripping +92 has 10 digits, so 13 digits
+        # here is definitely a CNIC.
         return "cnic"
-    if len(stripped) == 11 and stripped.startswith("03"):
+
+    m = normalize_mobile_for_upstream(raw)
+    if len(m) == 10 and m.startswith("3"):
         return "mobile"
-    if len(stripped) == 10 and stripped.startswith("3"):
-        return "mobile"
-    if len(stripped) == 11 and stripped.startswith("0"):
-        return "mobile"
+
     return "invalid"
 
 
@@ -329,6 +417,11 @@ def parse_results(html: str):
 # ---------------------------------------------------------------------------
 
 def _fetch_upstream(query_value: str):
+    """
+    query_value MUST already be normalized:
+      - CNIC → 13 digits
+      - Mobile → 10 digits starting with 3 (no leading 0)
+    """
     resp = requests.post(
         BASE_URL,
         headers=HEADERS,
@@ -340,10 +433,10 @@ def _fetch_upstream(query_value: str):
 
 
 def _pick_cnic_from_results(results, searched_mobile: str = "") -> str:
-    searched = normalize_mobile(searched_mobile) if searched_mobile else ""
+    searched = normalize_mobile_for_upstream(searched_mobile) if searched_mobile else ""
     if searched:
         for r in results:
-            if normalize_mobile(r.get("mobile", "")) == searched:
+            if normalize_mobile_for_upstream(r.get("mobile", "")) == searched:
                 c = normalize_cnic(r.get("cnic", ""))
                 if len(c) == 13:
                     return c
@@ -358,7 +451,7 @@ def _dedupe(results):
     seen = set()
     out = []
     for r in results:
-        key = (normalize_mobile(r.get("mobile", "")),
+        key = (normalize_mobile_for_upstream(r.get("mobile", "")),
                normalize_cnic(r.get("cnic", "")))
         if key in seen:
             continue
@@ -368,11 +461,11 @@ def _dedupe(results):
 
 
 def _merge_mobile_then_cnic(mobile_results, cnic_results, searched_mobile):
-    searched = normalize_mobile(searched_mobile)
+    searched = normalize_mobile_for_upstream(searched_mobile)
     prioritized = [r for r in mobile_results
-                   if normalize_mobile(r.get("mobile", "")) == searched]
+                   if normalize_mobile_for_upstream(r.get("mobile", "")) == searched]
     rest_mobile = [r for r in mobile_results
-                   if normalize_mobile(r.get("mobile", "")) != searched]
+                   if normalize_mobile_for_upstream(r.get("mobile", "")) != searched]
     return _dedupe(prioritized + rest_mobile + cnic_results)
 
 
@@ -382,43 +475,52 @@ def _merge_mobile_then_cnic(mobile_results, cnic_results, searched_mobile):
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    resp = make_response(render_template("index.html"))
+    _ensure_device_cookie()
+    _maybe_set_cookie(resp)
+    return resp
 
 
 @app.route("/api/quota", methods=["GET"])
 def quota():
-    fp = _device_fingerprint()
+    cookie_id = _ensure_device_cookie()
+    keys = _bucket_keys(cookie_id)
     now = int(time.time())
 
     with _store_lock:
         store = _load_store()
-        entry = store.get(fp)
-        if not entry or now - entry.get("start", 0) >= WINDOW_SECONDS:
-            used = 0
-            reset_in = WINDOW_SECONDS
-        else:
-            used = entry.get("count", 0)
-            reset_in = max(WINDOW_SECONDS - (now - entry["start"]), 0)
+        used = 0
+        reset_in = WINDOW_SECONDS
+        for k in keys:
+            entry = store.get(k)
+            if not entry or now - entry.get("start", 0) >= WINDOW_SECONDS:
+                continue
+            if entry["count"] > used:
+                used = entry["count"]
+                reset_in = max(WINDOW_SECONDS - (now - entry["start"]), 0)
 
     remaining = max(SEARCH_LIMIT - used, 0)
-    return jsonify({
+    resp = make_response(jsonify({
         "success": True,
         "limit": SEARCH_LIMIT,
         "used": used,
         "remaining": remaining,
         "reset_in": reset_in,
         "window_seconds": WINDOW_SECONDS,
-    })
+    }))
+    _maybe_set_cookie(resp)
+    return resp
 
 
 @app.route("/api/search", methods=["POST", "GET"])
 def search():
-    fp = _device_fingerprint()
-    allowed, remaining, reset_in, used = _check_and_increment(fp)
+    cookie_id = _ensure_device_cookie()
+    keys = _bucket_keys(cookie_id)
+    allowed, remaining, reset_in, used = _check_all_buckets(keys)
 
     if not allowed:
-        log.info("Rate limit hit fp=%s used=%s", fp[:8] + "...", used)
-        return jsonify({
+        log.info("Rate limit hit keys=%s", keys)
+        resp = make_response(jsonify({
             "success": False,
             "error": f"Search limit reached ({SEARCH_LIMIT} per hour). "
                      f"Try again in ~{max(reset_in // 60, 1)} min.",
@@ -426,7 +528,9 @@ def search():
             "used": used,
             "remaining": 0,
             "reset_in": reset_in,
-        }), 429
+        }), 429)
+        _maybe_set_cookie(resp)
+        return resp
 
     if request.is_json:
         data = request.get_json(silent=True) or {}
@@ -442,49 +546,74 @@ def search():
     ).strip()
 
     if not raw:
-        return jsonify({
+        resp = make_response(jsonify({
             "success": False,
             "error": "Please enter a CNIC (13 digits) or mobile number (11 digits)."
-        }), 400
+        }), 400)
+        _maybe_set_cookie(resp)
+        return resp
 
     if len(raw) > 40:
-        return jsonify({"success": False, "error": "Input too long."}), 400
+        resp = make_response(jsonify({"success": False, "error": "Input too long."}), 400)
+        _maybe_set_cookie(resp)
+        return resp
 
     kind = detect_input_type(raw)
 
     if kind == "cnic":
         query_value = normalize_cnic(raw)
         if not is_valid_cnic(query_value):
-            return jsonify({
+            resp = make_response(jsonify({
                 "success": False,
                 "error": "Invalid CNIC. Must be 13 digits (e.g., 4530448083059)."
-            }), 400
+            }), 400)
+            _maybe_set_cookie(resp)
+            return resp
         query_type = "cnic"
+
     elif kind == "mobile":
-        query_value = normalize_mobile(raw)
+        # Upstream wants 3XXXXXXXXX (10 digits, no leading 0)
+        query_value = normalize_mobile_for_upstream(raw)
         if not is_valid_mobile(query_value):
-            return jsonify({
+            resp = make_response(jsonify({
                 "success": False,
                 "error": "Invalid mobile number. Use 11-digit format (e.g., 03001234567)."
-            }), 400
+            }), 400)
+            _maybe_set_cookie(resp)
+            return resp
         query_type = "mobile"
+
     else:
-        return jsonify({
+        resp = make_response(jsonify({
             "success": False,
             "error": "Unrecognized input. Enter a 13-digit CNIC or 11-digit mobile number."
-        }), 400
+        }), 400)
+        _maybe_set_cookie(resp)
+        return resp
+
+    # Display-friendly version for logging / response
+    if query_type == "mobile":
+        query_display = normalize_mobile_display(query_value)  # 03XXXXXXXXX
+    else:
+        query_display = query_value
+
+    log.info("Upstream lookup type=%s value=%s (display=%s)",
+             query_type, query_value, query_display)
 
     try:
         first_results = _fetch_upstream(query_value)
     except requests.RequestException as e:
         log.warning("Upstream error: %s", e)
-        return jsonify({
+        resp = make_response(jsonify({
             "success": False,
             "error": "Upstream request failed. Try again shortly."
-        }), 502
+        }), 502)
+        _maybe_set_cookie(resp)
+        return resp
 
     meta = {
         "query_type": query_type,
+        "upstream_query": query_value,      # what we actually sent (3XXXXXXXXX)
         "auto_cnic_lookup": False,
         "auto_cnic": "",
         "first_lookup_count": len(first_results),
@@ -493,6 +622,7 @@ def search():
 
     final_results = first_results
 
+    # Auto second lookup: mobile → CNIC
     if query_type == "mobile" and first_results:
         discovered_cnic = _pick_cnic_from_results(first_results, searched_mobile=query_value)
         if discovered_cnic:
@@ -510,29 +640,33 @@ def search():
                 pass
 
     if not final_results:
-        return jsonify({
+        resp = make_response(jsonify({
             "success": True,
             "count": 0,
-            "query": query_value,
+            "query": query_display,
             "type": query_type,
             "results": [],
             "meta": meta,
             "quota": {"limit": SEARCH_LIMIT, "remaining": remaining, "reset_in": reset_in},
             "message": f"No results found for this {query_type.upper()}.",
-        })
+        }))
+        _maybe_set_cookie(resp)
+        return resp
 
-    log.info("Search ok fp=%s type=%s count=%s remaining=%s",
-             fp[:8] + "...", query_type, len(final_results), remaining)
+    log.info("Search ok type=%s count=%s remaining=%s",
+             query_type, len(final_results), remaining)
 
-    return jsonify({
+    resp = make_response(jsonify({
         "success": True,
         "count": len(final_results),
-        "query": query_value,
+        "query": query_display,
         "type": query_type,
         "results": final_results,
         "meta": meta,
         "quota": {"limit": SEARCH_LIMIT, "remaining": remaining, "reset_in": reset_in},
-    })
+    }))
+    _maybe_set_cookie(resp)
+    return resp
 
 
 @app.route("/api/health")
