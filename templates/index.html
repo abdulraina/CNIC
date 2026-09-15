@@ -1,604 +1,425 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Fresh SIM Tracker — CNIC & Mobile Lookup</title>
-<style>
-  * { box-sizing: border-box; }
-  body {
-    margin: 0;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, sans-serif;
-    background: linear-gradient(135deg, #1e3a8a 0%, #4c1d95 100%);
-    min-height: 100vh;
-    color: #1f2937;
-    padding: 24px;
-  }
-  .container {
-    max-width: 900px;
-    margin: 0 auto;
-    background: #ffffff;
-    border-radius: 16px;
-    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
-    overflow: hidden;
-  }
-  .header {
-    background: linear-gradient(135deg, #2563eb 0%, #7c3aed 100%);
-    color: white;
-    padding: 32px;
-    text-align: center;
-  }
-  .header h1 { margin: 0 0 8px; font-size: 1.8rem; }
-  .header p { margin: 0; opacity: 0.9; font-size: 0.95rem; }
-
-  .form-wrap { padding: 28px 32px 8px; }
-  .form-row { display: flex; gap: 12px; flex-wrap: wrap; }
-  input[type="text"] {
-    flex: 1;
-    min-width: 240px;
-    padding: 14px 16px;
-    border: 2px solid #e5e7eb;
-    border-radius: 10px;
-    font-size: 1rem;
-    transition: border-color 0.2s, box-shadow 0.2s;
-    outline: none;
-  }
-  input[type="text"]:focus {
-    border-color: #2563eb;
-    box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.15);
-  }
-  button {
-    padding: 14px 28px;
-    border: none;
-    border-radius: 10px;
-    background: linear-gradient(135deg, #2563eb 0%, #7c3aed 100%);
-    color: white;
-    font-size: 1rem;
-    font-weight: 600;
-    cursor: pointer;
-    transition: transform 0.15s, box-shadow 0.15s, opacity 0.15s;
-  }
-  button:hover:not(:disabled) {
-    transform: translateY(-1px);
-    box-shadow: 0 8px 20px rgba(37, 99, 235, 0.35);
-  }
-  button:disabled { opacity: 0.6; cursor: not-allowed; }
-
-  .hint { padding: 8px 32px 0; font-size: 0.82rem; color: #6b7280; }
-
-  .status { padding: 16px 32px 0; font-size: 0.9rem; }
-  .status.error { color: #b91c1c; }
-  .status.info  { color: #1d4ed8; }
-
-  .quota {
-    margin: 12px 32px 0;
-    padding: 8px 14px;
-    background: #eef2ff;
-    color: #3730a3;
-    border-radius: 8px;
-    font-size: 0.85rem;
-    display: inline-block;
-  }
-  .quota.low { background: #fef2f2; color: #991b1b; }
-
-  .badge {
-    display: inline-block;
-    padding: 2px 10px;
-    border-radius: 999px;
-    font-size: 0.75rem;
-    font-weight: 700;
-    letter-spacing: 0.03em;
-    margin-left: 8px;
-    vertical-align: middle;
-  }
-  .badge-cnic   { background: #dbeafe; color: #1e40af; }
-  .badge-mobile { background: #dcfce7; color: #166534; }
-  .badge-auto   { background: #fef3c7; color: #92400e; }
-
-  .auto-note {
-    margin: 12px 32px 0;
-    padding: 10px 14px;
-    border-left: 4px solid #f59e0b;
-    background: #fffbeb;
-    color: #78350f;
-    font-size: 0.9rem;
-    border-radius: 6px;
-  }
-
-  .spinner {
-    display: inline-block;
-    width: 16px; height: 16px;
-    border: 2px solid rgba(255,255,255,0.4);
-    border-top-color: #fff;
-    border-radius: 50%;
-    animation: spin 0.8s linear infinite;
-    vertical-align: -3px;
-    margin-right: 8px;
-  }
-  @keyframes spin { to { transform: rotate(360deg); } }
-
-  .results { padding: 20px 32px 32px; }
-
-  /* Toolbar (PDF / print) */
-  .results-toolbar {
-    display: flex;
-    justify-content: flex-end;
-    gap: 10px;
-    margin-bottom: 14px;
-    flex-wrap: wrap;
-  }
-  .btn-secondary {
-    background: #ffffff;
-    color: #1e40af;
-    border: 2px solid #1e40af;
-    padding: 10px 18px;
-    border-radius: 10px;
-    font-weight: 600;
-    font-size: 0.9rem;
-    cursor: pointer;
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    transition: background 0.15s, transform 0.15s;
-  }
-  .btn-secondary:hover { background: #eef2ff; transform: translateY(-1px); }
-  .btn-secondary svg { width: 16px; height: 16px; }
-
-  .card {
-    border: 1px solid #e5e7eb;
-    border-left: 4px solid #7c3aed;
-    border-radius: 10px;
-    padding: 18px 20px;
-    margin-bottom: 14px;
-    background: #fafafa;
-    transition: box-shadow 0.2s;
-    break-inside: avoid;         /* keep a card from splitting across pages */
-    page-break-inside: avoid;    /* legacy */
-  }
-  .card:hover { box-shadow: 0 6px 18px rgba(0,0,0,0.08); }
-  .card.primary { border-left-color: #059669; background: #f0fdf4; }
-  .row {
-    display: flex;
-    padding: 6px 0;
-    border-bottom: 1px dashed #eee;
-    font-size: 0.95rem;
-  }
-  .row:last-child { border-bottom: none; }
-  .label { width: 110px; font-weight: 600; color: #4b5563; flex-shrink: 0; }
-  .value {
-    color: #111827;
-    word-break: break-word;
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 6px;
-  }
-  .network-logo { height: 24px; width: auto; border-radius: 3px; vertical-align: middle; }
-
-  @media (max-width: 600px) {
-    .header { padding: 22px; }
-    .header h1 { font-size: 1.4rem; }
-    .form-wrap, .results, .status, .hint, .auto-note, .quota {
-      padding-left: 18px; padding-right: 18px;
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Secure Login — Fresh SIM Tracker</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, sans-serif;
+      background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      color: #e2e8f0;
     }
-    .auto-note, .quota { margin-left: 18px; margin-right: 18px; }
-    .label { width: 90px; font-size: 0.9rem; }
-  }
-
-  /* ------------------------------------------------------------------
-     PRINT / PDF STYLES
-     Applied only when the user prints or chooses "Save as PDF".
-     ------------------------------------------------------------------ */
-  @media print {
-    @page {
-      size: A4;
-      margin: 14mm 12mm;
+    .login-container {
+      width: 100%;
+      max-width: 420px;
+      background: rgba(30, 41, 59, 0.8);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border: 1px solid rgba(148, 163, 184, 0.15);
+      border-radius: 24px;
+      padding: 48px 40px;
+      box-shadow: 0 25px 60px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255,255,255,0.03) inset;
     }
-
-    /* Reset page background, drop shadows, remove buttons */
-    html, body {
-      background: #ffffff !important;
-      padding: 0 !important;
-      margin: 0 !important;
-      color: #000;
-      -webkit-print-color-adjust: exact;
-              print-color-adjust: exact;
+    .lock-icon {
+      width: 64px;
+      height: 64px;
+      margin: 0 auto 24px;
+      background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+      border-radius: 18px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 8px 24px rgba(59, 130, 246, 0.4);
     }
-    .container {
-      box-shadow: none !important;
-      border-radius: 0 !important;
-      max-width: 100% !important;
-      margin: 0 !important;
+    .lock-icon svg {
+      width: 32px;
+      height: 32px;
+      stroke: white;
+      fill: none;
+      stroke-width: 2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
     }
-    .header {
-      background: #1e40af !important;
-      color: #ffffff !important;
-      padding: 16px !important;
-      -webkit-print-color-adjust: exact;
-              print-color-adjust: exact;
+    h1 {
+      font-size: 1.75rem;
+      font-weight: 700;
+      text-align: center;
+      margin-bottom: 8px;
+      background: linear-gradient(135deg, #60a5fa, #a78bfa);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
     }
-    .header h1 { font-size: 1.3rem; margin: 0 0 4px; }
-    .header p  { font-size: 0.8rem; }
-
-    /* Hide everything interactive */
-    .form-wrap,
-    .hint,
-    .status,
-    .quota,
-    #autoNote,
-    .results-toolbar { display: none !important; }
-
-    /* Ensure results fill the page */
-    .results { padding: 12px 0 0 !important; }
-
-    .card {
-      border: 1px solid #cccccc;
-      background: #fafafa !important;
-      padding: 12px 14px;
-      margin-bottom: 10px;
-      box-shadow: none !important;
-      -webkit-print-color-adjust: exact;
-              print-color-adjust: exact;
+    .subtitle {
+      text-align: center;
+      font-size: 0.9rem;
+      color: #94a3b8;
+      margin-bottom: 36px;
     }
-    .card.primary { background: #f0fdf4 !important; }
-    .row { font-size: 12px; padding: 4px 0; }
-    .label { width: 90px; font-size: 12px; }
-    .value { font-size: 12px; }
-    .network-logo { height: 18px; }
-
-    .badge { font-size: 10px; padding: 1px 6px; }
-  }
-</style>
+    .form-group { margin-bottom: 22px; position: relative; }
+    .form-group label {
+      display: block;
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: #cbd5e1;
+      margin-bottom: 8px;
+      letter-spacing: 0.02em;
+    }
+    .form-group input {
+      width: 100%;
+      padding: 14px 16px;
+      background: rgba(15, 23, 42, 0.6);
+      border: 1.5px solid rgba(148, 163, 184, 0.2);
+      border-radius: 12px;
+      font-size: 1rem;
+      color: #f1f5f9;
+      outline: none;
+      transition: border-color 0.25s, box-shadow 0.25s, background 0.25s;
+    }
+    .form-group input::placeholder { color: #64748b; }
+    .form-group input:focus {
+      border-color: #3b82f6;
+      background: rgba(15, 23, 42, 0.9);
+      box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.15);
+    }
+    .form-group input.error {
+      border-color: #ef4444;
+      box-shadow: 0 0 0 4px rgba(239, 68, 68, 0.15);
+      animation: shake 0.4s ease;
+    }
+    @keyframes shake {
+      0%, 100% { transform: translateX(0); }
+      20% { transform: translateX(-8px); }
+      40% { transform: translateX(8px); }
+      60% { transform: translateX(-5px); }
+      80% { transform: translateX(5px); }
+    }
+    .password-wrapper { position: relative; }
+    .toggle-password {
+      position: absolute;
+      right: 14px;
+      top: 50%;
+      transform: translateY(-50%);
+      background: none;
+      border: none;
+      cursor: pointer;
+      padding: 4px;
+      color: #64748b;
+      transition: color 0.2s;
+      display: flex;
+      align-items: center;
+    }
+    .toggle-password:hover { color: #94a3b8; }
+    .toggle-password svg {
+      width: 20px; height: 20px;
+      fill: none; stroke: currentColor;
+      stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;
+    }
+    .btn-login {
+      width: 100%;
+      padding: 15px;
+      background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+      color: white;
+      border: none;
+      border-radius: 12px;
+      font-size: 1rem;
+      font-weight: 700;
+      letter-spacing: 0.03em;
+      cursor: pointer;
+      transition: transform 0.15s, box-shadow 0.15s, opacity 0.15s;
+    }
+    .btn-login:hover:not(:disabled) {
+      transform: translateY(-2px);
+      box-shadow: 0 12px 28px rgba(59, 130, 246, 0.4);
+    }
+    .btn-login:disabled { opacity: 0.6; cursor: not-allowed; }
+    .btn-login .spinner {
+      display: inline-block;
+      width: 18px; height: 18px;
+      border: 2.5px solid rgba(255,255,255,0.3);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      vertical-align: -4px;
+      margin-right: 8px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .error-message, .lockout-message {
+      display: none;
+      margin-top: 18px;
+      padding: 12px 16px;
+      border-radius: 10px;
+      font-size: 0.875rem;
+      text-align: center;
+      animation: fadeIn 0.3s ease;
+    }
+    .error-message {
+      background: rgba(239, 68, 68, 0.12);
+      border: 1px solid rgba(239, 68, 68, 0.3);
+      color: #fca5a5;
+    }
+    .lockout-message {
+      background: rgba(245, 158, 11, 0.12);
+      border: 1px solid rgba(245, 158, 11, 0.3);
+      color: #fcd34d;
+    }
+    .error-message.show, .lockout-message.show { display: block; }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(-6px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .security-note {
+      margin-top: 28px;
+      padding-top: 20px;
+      border-top: 1px solid rgba(148, 163, 184, 0.1);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      font-size: 0.78rem;
+      color: #64748b;
+    }
+    .security-note svg {
+      width: 14px; height: 14px;
+      stroke: #64748b; fill: none; stroke-width: 2;
+    }
+    @media (max-width: 480px) {
+      .login-container { padding: 36px 24px; border-radius: 20px; }
+      h1 { font-size: 1.4rem; }
+    }
+  </style>
 </head>
 <body>
-  <div class="container">
-    <div class="header">
-      <h1>📱 Fresh SIM Tracker</h1>
-      <p>Search SIM details by CNIC or Mobile number</p>
+  <div class="login-container">
+    <div class="lock-icon">
+      <svg viewBox="0 0 24 24">
+        <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+        <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+      </svg>
     </div>
+    <h1>Secure Access</h1>
+    <p class="subtitle">Fresh SIM Tracker — Authorized Personnel Only</p>
 
-    <div class="form-wrap">
-      <form id="searchForm" class="form-row">
-        <input
-          type="text"
-          id="query"
-          name="query"
-          placeholder="Enter CNIC (13 digits) or Mobile (11 digits)"
-          maxlength="20"
-          autocomplete="off"
-          required
-        />
-        <button type="submit" id="submitBtn">Search</button>
-      </form>
-    </div>
-    <div class="hint">
-      Examples: <strong>4530448083059</strong> (CNIC) &nbsp;•&nbsp;
-      <strong>03001234567</strong> or <strong>+923001234567</strong> (Mobile)
-    </div>
-
-    <div id="quotaBox" class="quota" style="display:none;"></div>
-    <div id="status" class="status"></div>
-    <div id="autoNote"></div>
-
-    <div class="results" id="resultsWrap">
-      <div id="resultsToolbar" class="results-toolbar" style="display:none;">
-        <button type="button" id="downloadPdfBtn" class="btn-secondary" title="Save results as PDF">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-            <polyline points="7 10 12 15 17 10"/>
-            <line x1="12" y1="15" x2="12" y2="3"/>
-          </svg>
-          Save as PDF
-        </button>
+    <form id="loginForm" autocomplete="off">
+      <div class="form-group">
+        <label for="username">Username</label>
+        <input type="text" id="username" name="username" placeholder="Enter your username"
+               maxlength="64" autocomplete="username" required />
       </div>
-      <div id="results"></div>
+
+      <div class="form-group">
+        <label for="password">Password</label>
+        <div class="password-wrapper">
+          <input type="password" id="password" name="password" placeholder="Enter your password"
+                 maxlength="128" autocomplete="current-password" required />
+          <button type="button" class="toggle-password" id="togglePassword" aria-label="Toggle password visibility">
+            <svg id="eyeIcon" viewBox="0 0 24 24">
+              <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+              <circle cx="12" cy="12" r="3"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      <button type="submit" class="btn-login" id="loginBtn">Sign In</button>
+
+      <div class="error-message" id="errorMsg"></div>
+      <div class="lockout-message" id="lockoutMsg"></div>
+    </form>
+
+    <div class="security-note">
+      <svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+      <span>End-to-end encrypted • Session protected</span>
     </div>
   </div>
 
-<script>
-  // -------------------------------------------------------------------------
-  //  JS Fingerprint
-  // -------------------------------------------------------------------------
-  function computeFingerprint() {
-    const parts = [];
-    parts.push(`scr:${screen.width}x${screen.height}x${screen.colorDepth}`);
-    parts.push(`dpr:${window.devicePixelRatio || 1}`);
-    parts.push(`tz:${Intl.DateTimeFormat().resolvedOptions().timeZone || "?"}`);
-    parts.push(`lang:${navigator.language || "?"}`);
-    parts.push(`langs:${(navigator.languages || []).join(",")}`);
-    parts.push(`cores:${navigator.hardwareConcurrency || "?"}`);
-    parts.push(`mem:${navigator.deviceMemory || "?"}`);
-    parts.push(`touch:${(navigator.maxTouchPoints || 0)}`);
-    parts.push(`plat:${navigator.platform || "?"}`);
+  <script>
+    (function() {
+      "use strict";
 
-    try {
-      const c = document.createElement("canvas");
-      c.width = 220; c.height = 40;
-      const ctx = c.getContext("2d");
-      if (ctx) {
-        ctx.textBaseline = "top";
-        ctx.font = "16px 'Arial'";
-        ctx.fillStyle = "#f60"; ctx.fillRect(0, 0, 220, 40);
-        ctx.fillStyle = "#069"; ctx.fillText("Fingerprint!", 4, 8);
-        ctx.fillStyle = "rgba(102, 204, 0, 0.7)";
-        ctx.fillText("Fingerprint!", 6, 20);
-        parts.push(`canvas:${c.toDataURL().slice(-64)}`);
+      // --- CSRF token -----------------------------------------------------
+      function generateCSRFToken() {
+        const arr = new Uint8Array(32);
+        crypto.getRandomValues(arr);
+        return Array.from(arr, b => b.toString(16).padStart(2, "0")).join("");
       }
-    } catch { parts.push("canvas:err"); }
+      const CSRF_TOKEN = generateCSRFToken();
 
-    try {
-      const c = document.createElement("canvas");
-      const gl = c.getContext("webgl") || c.getContext("experimental-webgl");
-      if (gl) {
-        const dbg = gl.getExtension("WEBGL_debug_renderer_info");
-        if (dbg) {
-          parts.push(`gpu:${gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL)}|${gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)}`);
-        } else {
-          parts.push(`gpu:${gl.getParameter(gl.VENDOR)}|${gl.getParameter(gl.RENDERER)}`);
+      // --- DOM ------------------------------------------------------------
+      const form       = document.getElementById("loginForm");
+      const usernameEl = document.getElementById("username");
+      const passwordEl = document.getElementById("password");
+      const loginBtn   = document.getElementById("loginBtn");
+      const errorMsg   = document.getElementById("errorMsg");
+      const lockoutMsg = document.getElementById("lockoutMsg");
+      const toggleBtn  = document.getElementById("togglePassword");
+      const eyeIcon    = document.getElementById("eyeIcon");
+
+      // --- Client-side rate limit ----------------------------------------
+      const MAX_ATTEMPTS = 5;
+      const LOCKOUT_MS   = 5 * 60 * 1000;
+      const STORAGE_KEY  = "rnx_login_attempts";
+
+      function getAttemptData() {
+        try {
+          const raw = localStorage.getItem(STORAGE_KEY);
+          if (!raw) return { count: 0, lockedUntil: 0 };
+          const d = JSON.parse(raw);
+          return (typeof d.count === "number" && typeof d.lockedUntil === "number")
+            ? d : { count: 0, lockedUntil: 0 };
+        } catch { return { count: 0, lockedUntil: 0 }; }
+      }
+      function saveAttemptData(d) {
+        try { localStorage.setItem(STORAGE_KEY, JSON.stringify(d)); } catch {}
+      }
+      function resetAttempts() {
+        try { localStorage.removeItem(STORAGE_KEY); } catch {}
+      }
+      function isLockedOut() {
+        const d = getAttemptData();
+        if (d.lockedUntil && Date.now() < d.lockedUntil) return true;
+        if (d.lockedUntil && Date.now() >= d.lockedUntil) { resetAttempts(); return false; }
+        return false;
+      }
+      function recordFailedAttempt() {
+        const d = getAttemptData();
+        d.count = (d.count || 0) + 1;
+        if (d.count >= MAX_ATTEMPTS) d.lockedUntil = Date.now() + LOCKOUT_MS;
+        saveAttemptData(d);
+      }
+      function updateLockoutUI() {
+        const d = getAttemptData();
+        if (d.lockedUntil && Date.now() < d.lockedUntil) {
+          const secs = Math.ceil((d.lockedUntil - Date.now()) / 1000);
+          const m = Math.floor(secs / 60), s = secs % 60;
+          lockoutMsg.textContent = `Too many failed attempts. Try again in ${m}m ${s}s.`;
+          lockoutMsg.classList.add("show");
+          loginBtn.disabled = usernameEl.disabled = passwordEl.disabled = true;
+          return true;
         }
-      }
-    } catch { parts.push("gpu:err"); }
-
-    let h = 0x811c9dc5;
-    const str = parts.join("||");
-    for (let i = 0; i < str.length; i++) {
-      h ^= str.charCodeAt(i);
-      h = (h * 0x01000193) >>> 0;
-    }
-    return "fp_" + h.toString(16).padStart(8, "0") + "_" + str.length.toString(16);
-  }
-
-  const FINGERPRINT = computeFingerprint();
-
-  // -------------------------------------------------------------------------
-  //  DOM
-  // -------------------------------------------------------------------------
-  const form          = document.getElementById("searchForm");
-  const input         = document.getElementById("query");
-  const btn           = document.getElementById("submitBtn");
-  const statusEl      = document.getElementById("status");
-  const autoNote      = document.getElementById("autoNote");
-  const resultsEl     = document.getElementById("results");
-  const quotaBox      = document.getElementById("quotaBox");
-  const toolbar       = document.getElementById("resultsToolbar");
-  const downloadBtn   = document.getElementById("downloadPdfBtn");
-
-  function setStatus(html, type = "") {
-    statusEl.className = "status " + type;
-    statusEl.innerHTML = html;
-  }
-  function clearAutoNote() { autoNote.innerHTML = ""; }
-  function setAutoNote(html) {
-    autoNote.innerHTML = `<div class="auto-note">${html}</div>`;
-  }
-  function escapeHtml(str) {
-    return String(str == null ? "" : str).replace(/[&<>"']/g, c => ({
-      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
-    }[c]));
-  }
-  function showToolbar(show) {
-    toolbar.style.display = show ? "flex" : "none";
-  }
-
-  function humanizeReset(seconds) {
-    if (!seconds || seconds <= 0) return "soon";
-    const mins = Math.ceil(seconds / 60);
-    if (mins < 60) return `${mins} min`;
-    const hours = Math.floor(mins / 60);
-    const remMin = mins % 60;
-    return remMin ? `${hours}h ${remMin}m` : `${hours}h`;
-  }
-
-  function setQuota(q) {
-    if (!q) { quotaBox.style.display = "none"; return; }
-    quotaBox.style.display = "inline-block";
-    quotaBox.classList.toggle("low", q.remaining <= 2);
-    quotaBox.textContent =
-      `Searches remaining: ${q.remaining} / ${q.limit}` +
-      (q.reset_in > 0 ? ` (resets in ~${humanizeReset(q.reset_in)})` : "");
-  }
-
-  function detectType(raw) {
-    const digits = raw.replace(/\D/g, "");
-    let stripped = digits;
-    if (stripped.startsWith("0092")) stripped = stripped.slice(4);
-    else if (stripped.startsWith("92") && stripped.length === 12) stripped = stripped.slice(2);
-
-    if (digits.length === 13 && !digits.startsWith("0")) return "cnic";
-    if (stripped.length === 11 && stripped.startsWith("03")) return "mobile";
-    if (stripped.length === 10 && stripped.startsWith("3"))  return "mobile";
-    return "invalid";
-  }
-
-  // Track current query so we can name the PDF meaningfully
-  let CURRENT_QUERY = "";
-
-  function renderResults(list, searchedMobile, queryForPdf) {
-    if (!list.length) { resultsEl.innerHTML = ""; showToolbar(false); return; }
-    const normalize = s => String(s || "").replace(/\D/g, "");
-    const searched = normalize(searchedMobile);
-
-    CURRENT_QUERY = queryForPdf || "";
-
-    // Print-only header (page title) — hidden on screen, visible in PDF
-    const printHeader = `
-      <div class="print-only" style="display:none;">
-        <h2 style="margin:0 0 4px;font-size:16px;">Fresh SIM Tracker — Search Report</h2>
-        <p style="margin:0 0 12px;font-size:12px;color:#555;">
-          Query: <strong>${escapeHtml(CURRENT_QUERY)}</strong> &nbsp;•&nbsp;
-          Generated: ${new Date().toLocaleString()}
-        </p>
-      </div>
-    `;
-
-    resultsEl.innerHTML = printHeader + list.map((r, i) => {
-      const isPrimary = searched && normalize(r.mobile) === searched;
-
-      let networkCell = "";
-      if (r.network_image) {
-        networkCell += `<img class="network-logo"
-                            src="${escapeHtml(r.network_image)}"
-                            alt="${escapeHtml(r.network || 'network')}"
-                            onerror="this.style.display='none'" />`;
-      }
-      if (r.network && String(r.network).trim()) {
-        networkCell += `<span>${escapeHtml(r.network)}</span>`;
-      } else if (!r.network_image) {
-        networkCell = "<span>—</span>";
+        lockoutMsg.classList.remove("show");
+        loginBtn.disabled = usernameEl.disabled = passwordEl.disabled = false;
+        return false;
       }
 
-      return `
-        <div class="card${isPrimary ? " primary" : ""}">
-          <div class="row"><div class="label">#</div><div class="value">${i + 1}${isPrimary ? ' <span class="badge badge-auto">MATCH</span>' : ""}</div></div>
-          <div class="row"><div class="label">Mobile</div><div class="value">${escapeHtml(r.mobile || "—")}</div></div>
-          <div class="row"><div class="label">Name</div><div class="value">${escapeHtml(r.name || "—")}</div></div>
-          <div class="row"><div class="label">CNIC</div><div class="value">${escapeHtml(r.cnic || "—")}</div></div>
-          <div class="row"><div class="label">Address</div><div class="value">${escapeHtml(r.address || "—")}</div></div>
-          <div class="row"><div class="label">Network</div><div class="value">${networkCell}</div></div>
-        </div>
-      `;
-    }).join("");
+      let lockoutTimer = null;
+      function startLockoutCountdown() {
+        if (lockoutTimer) clearInterval(lockoutTimer);
+        lockoutTimer = setInterval(() => {
+          if (!updateLockoutUI()) {
+            clearInterval(lockoutTimer);
+            lockoutTimer = null;
+            resetAttempts();
+          }
+        }, 1000);
+      }
 
-    showToolbar(true);
-  }
+      if (isLockedOut()) { updateLockoutUI(); startLockoutCountdown(); }
 
-  // -------------------------------------------------------------------------
-  //  Quota fetch on load
-  // -------------------------------------------------------------------------
-  async function refreshQuota() {
-    try {
-      const r = await fetch("/api/quota", {
-        method: "GET",
-        credentials: "include",
-        headers: { "X-Fingerprint": FINGERPRINT }
-      });
-      if (!r.ok) return;
-      const q = await r.json();
-      if (q.success) setQuota(q);
-    } catch { /* ignore */ }
-  }
-
-  refreshQuota();
-
-  // -------------------------------------------------------------------------
-  //  Search
-  // -------------------------------------------------------------------------
-  form.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const raw = input.value.trim();
-
-    const kind = detectType(raw);
-    if (kind === "invalid") {
-      setStatus("Enter a valid 13-digit CNIC or 11-digit mobile number.", "error");
-      resultsEl.innerHTML = "";
-      clearAutoNote();
-      showToolbar(false);
-      return;
-    }
-
-    btn.disabled = true;
-    btn.innerHTML = '<span class="spinner"></span>Searching...';
-    setStatus(
-      kind === "mobile"
-        ? "Searching mobile... (may also auto-fetch all numbers by CNIC)"
-        : "Querying server...",
-      "info"
-    );
-    resultsEl.innerHTML = "";
-    clearAutoNote();
-    showToolbar(false);
-
-    try {
-      const res = await fetch("/api/search", {
-        method: "POST",
-        credentials: "include",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Fingerprint": FINGERPRINT
-        },
-        body: JSON.stringify({ query: raw })
+      // --- Password visibility toggle ------------------------------------
+      toggleBtn.addEventListener("click", () => {
+        const isPw = passwordEl.type === "password";
+        passwordEl.type = isPw ? "text" : "password";
+        eyeIcon.innerHTML = isPw
+          ? '<path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/>'
+          : '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>';
       });
 
-      const data = await res.json();
+      // --- Sanitize username ---------------------------------------------
+      usernameEl.addEventListener("input", function() {
+        this.value = this.value.replace(/[^\w.\-@]/g, "");
+      });
 
-      if (data.quota) setQuota(data.quota);
-
-      if (res.status === 429) {
-        setStatus(escapeHtml(data.error || "Rate limit reached."), "error");
-        refreshQuota();
-        return;
+      // --- Errors ---------------------------------------------------------
+      function showError(msg) {
+        errorMsg.textContent = msg;
+        errorMsg.classList.add("show");
+        usernameEl.classList.add("error");
+        passwordEl.classList.add("error");
+        setTimeout(() => {
+          usernameEl.classList.remove("error");
+          passwordEl.classList.remove("error");
+        }, 500);
+      }
+      function clearError() {
+        errorMsg.classList.remove("show");
+        usernameEl.classList.remove("error");
+        passwordEl.classList.remove("error");
       }
 
-      if (!res.ok || !data.success) {
-        setStatus(escapeHtml(data.error || `Request failed (${res.status})`), "error");
-        return;
-      }
+      // --- Submit ---------------------------------------------------------
+      form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        clearError();
 
-      const badge = data.type === "cnic"
-        ? '<span class="badge badge-cnic">CNIC</span>'
-        : '<span class="badge badge-mobile">MOBILE</span>';
+        if (isLockedOut()) { updateLockoutUI(); startLockoutCountdown(); return; }
 
-      if (data.count === 0) {
-        setStatus(`No results found for this ${data.type.toUpperCase()}. ${badge}`, "error");
-        return;
-      }
+        const username = usernameEl.value.trim();
+        const password = passwordEl.value;
 
-      setStatus(
-        `Found ${data.count} result(s) for <strong>${escapeHtml(data.query)}</strong> ${badge}`,
-        "info"
-      );
+        if (!username || username.length < 3) { showError("Username must be at least 3 characters."); return; }
+        if (!password || password.length < 6)   { showError("Password must be at least 6 characters."); return; }
 
-      const meta = data.meta || {};
-      if (meta.auto_cnic_lookup && meta.auto_cnic) {
-        setAutoNote(
-          `ℹ️ Mobile lookup returned CNIC <strong>${escapeHtml(meta.auto_cnic)}</strong>. ` +
-          `Auto-fetched <strong>${meta.second_lookup_count}</strong> number(s) against this CNIC.`
-        );
-      }
+        loginBtn.disabled = true;
+        loginBtn.innerHTML = '<span class="spinner"></span>Authenticating...';
+        usernameEl.disabled = passwordEl.disabled = true;
 
-      renderResults(
-        data.results,
-        data.type === "mobile" ? data.query : "",
-        data.query || raw
-      );
+        try {
+          const res = await fetch("/api/login", {
+            method: "POST",
+            credentials: "include",
+            headers: {
+              "Content-Type": "application/json",
+              "X-CSRF-Token": CSRF_TOKEN,
+              "X-Requested-With": "XMLHttpRequest"
+            },
+            body: JSON.stringify({
+              username: username,
+              password: password,
+              csrf_token: CSRF_TOKEN
+            })
+          });
 
-    } catch (err) {
-      setStatus("Network error: " + escapeHtml(err.message), "error");
-    } finally {
-      btn.disabled = false;
-      btn.textContent = "Search";
-    }
-  });
+          const data = await res.json().catch(() => ({}));
 
-  input.addEventListener("input", () => {
-    input.value = input.value.replace(/[^\d+\-\s]/g, "");
-  });
+          if (res.ok && data.success) {
+            resetAttempts();
+            loginBtn.innerHTML = "✓ Redirecting...";
+            setTimeout(() => { window.location.href = data.redirect || "/app"; }, 400);
+            return;
+          }
 
-  // -------------------------------------------------------------------------
-  //  Save as PDF — uses the browser's native print engine
-  // -------------------------------------------------------------------------
-  downloadBtn.addEventListener("click", () => {
-    // Set the document title temporarily so the PDF filename is meaningful.
-    const originalTitle = document.title;
-    const safeQuery = CURRENT_QUERY.replace(/[^\w\-]/g, "_") || "results";
-    document.title = `FreshSIM_${safeQuery}`;
+          recordFailedAttempt();
+          const remaining = MAX_ATTEMPTS - getAttemptData().count;
+          if (remaining > 0) {
+            showError(data.error || `Invalid credentials. ${remaining} attempt(s) remaining.`);
+          } else {
+            showError("Account temporarily locked.");
+            updateLockoutUI();
+            startLockoutCountdown();
+          }
+        } catch (err) {
+          showError("Network error. Please check your connection.");
+        } finally {
+          if (!isLockedOut()) {
+            loginBtn.disabled = false;
+            loginBtn.textContent = "Sign In";
+            usernameEl.disabled = passwordEl.disabled = false;
+          }
+        }
+      });
 
-    // Show the print-only header (it's hidden on screen via inline style)
-    const printHeader = document.querySelector(".print-only");
-    if (printHeader) printHeader.style.display = "block";
-
-    // Give the browser a tick to update the DOM before invoking print
-    setTimeout(() => {
-      window.print();
-
-      // Restore after the dialog closes
-      setTimeout(() => {
-        document.title = originalTitle;
-        if (printHeader) printHeader.style.display = "none";
-      }, 500);
-    }, 50);
-  });
-</script>
+      window.addEventListener("load", () => {
+        if (!isLockedOut()) usernameEl.focus();
+      });
+    })();
+  </script>
 </body>
 </html>
