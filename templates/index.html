@@ -31,11 +31,16 @@
   }
   .header h1 { margin: 0 0 8px; font-size: 1.8rem; }
   .header p { margin: 0; opacity: 0.9; font-size: 0.95rem; }
-  .logout-btn {
+  .header-actions {
     position: absolute;
     top: 20px;
     right: 20px;
-    padding: 8px 16px;
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .header-btn {
+    padding: 8px 14px;
     background: rgba(255,255,255,0.15);
     color: white;
     border: 1px solid rgba(255,255,255,0.3);
@@ -43,9 +48,10 @@
     font-size: 0.85rem;
     font-weight: 600;
     cursor: pointer;
+    text-decoration: none;
     transition: background 0.2s;
   }
-  .logout-btn:hover { background: rgba(255,255,255,0.25); }
+  .header-btn:hover { background: rgba(255,255,255,0.25); }
 
   .form-wrap { padding: 28px 32px 8px; }
   .form-row { display: flex; gap: 12px; flex-wrap: wrap; }
@@ -192,7 +198,8 @@
   @media (max-width: 600px) {
     .header { padding: 22px; }
     .header h1 { font-size: 1.4rem; }
-    .logout-btn { top: 12px; right: 12px; padding: 6px 12px; font-size: 0.75rem; }
+    .header-actions { top: 12px; right: 12px; padding: 0; }
+    .header-btn { padding: 6px 10px; font-size: 0.72rem; }
     .form-wrap, .results, .status, .hint, .auto-note, .quota {
       padding-left: 18px; padding-right: 18px;
     }
@@ -221,7 +228,7 @@
       color: #ffffff !important;
       padding: 16px !important;
     }
-    .logout-btn { display: none !important; }
+    .header-actions { display: none !important; }
     .header h1 { font-size: 1.3rem; margin: 0 0 4px; }
     .header p  { font-size: 0.8rem; }
 
@@ -248,7 +255,11 @@
 <body>
   <div class="container">
     <div class="header">
-      <button class="logout-btn" id="logoutBtn" type="button">Logout</button>
+      <div class="header-actions">
+        <a href="/admin" id="adminLink" class="header-btn" style="display:none;">⚙️ Admin</a>
+        <button class="header-btn" id="changePwBtn" type="button">🔑 Password</button>
+        <button class="header-btn" id="logoutBtn" type="button">Logout</button>
+      </div>
       <h1>📱 Fresh SIM Tracker</h1>
       <p>Search SIM details by CNIC or Mobile number</p>
     </div>
@@ -293,6 +304,9 @@
   </div>
 
 <script>
+  // -------------------------------------------------------------------------
+  //  JS Fingerprint
+  // -------------------------------------------------------------------------
   function computeFingerprint() {
     const parts = [];
     parts.push(`scr:${screen.width}x${screen.height}x${screen.colorDepth}`);
@@ -304,6 +318,7 @@
     parts.push(`mem:${navigator.deviceMemory || "?"}`);
     parts.push(`touch:${(navigator.maxTouchPoints || 0)}`);
     parts.push(`plat:${navigator.platform || "?"}`);
+
     try {
       const c = document.createElement("canvas");
       c.width = 220; c.height = 40;
@@ -318,6 +333,7 @@
         parts.push(`canvas:${c.toDataURL().slice(-64)}`);
       }
     } catch { parts.push("canvas:err"); }
+
     try {
       const c = document.createElement("canvas");
       const gl = c.getContext("webgl") || c.getContext("experimental-webgl");
@@ -330,6 +346,7 @@
         }
       }
     } catch { parts.push("gpu:err"); }
+
     let h = 0x811c9dc5;
     const str = parts.join("||");
     for (let i = 0; i < str.length; i++) {
@@ -341,6 +358,9 @@
 
   const FINGERPRINT = computeFingerprint();
 
+  // -------------------------------------------------------------------------
+  //  DOM
+  // -------------------------------------------------------------------------
   const form        = document.getElementById("searchForm");
   const input       = document.getElementById("query");
   const btn         = document.getElementById("submitBtn");
@@ -351,6 +371,8 @@
   const toolbar     = document.getElementById("resultsToolbar");
   const downloadBtn = document.getElementById("downloadPdfBtn");
   const logoutBtn   = document.getElementById("logoutBtn");
+  const changePwBtn = document.getElementById("changePwBtn");
+  const adminLink   = document.getElementById("adminLink");
 
   function setStatus(html, type = "") {
     statusEl.className = "status " + type;
@@ -368,6 +390,7 @@
   function showToolbar(show) {
     toolbar.style.display = show ? "flex" : "none";
   }
+
   function humanizeReset(seconds) {
     if (!seconds || seconds <= 0) return "soon";
     const mins = Math.ceil(seconds / 60);
@@ -376,6 +399,7 @@
     const remMin = mins % 60;
     return remMin ? `${hours}h ${remMin}m` : `${hours}h`;
   }
+
   function setQuota(q) {
     if (!q) { quotaBox.style.display = "none"; return; }
     quotaBox.style.display = "inline-block";
@@ -384,11 +408,13 @@
       `Searches remaining: ${q.remaining} / ${q.limit}` +
       (q.reset_in > 0 ? ` (resets in ~${humanizeReset(q.reset_in)})` : "");
   }
+
   function detectType(raw) {
     const digits = raw.replace(/\D/g, "");
     let stripped = digits;
     if (stripped.startsWith("0092")) stripped = stripped.slice(4);
     else if (stripped.startsWith("92") && stripped.length === 12) stripped = stripped.slice(2);
+
     if (digits.length === 13 && !digits.startsWith("0")) return "cnic";
     if (stripped.length === 11 && stripped.startsWith("03")) return "mobile";
     if (stripped.length === 10 && stripped.startsWith("3"))  return "mobile";
@@ -401,6 +427,7 @@
     if (!list.length) { resultsEl.innerHTML = ""; showToolbar(false); return; }
     const normalize = s => String(s || "").replace(/\D/g, "");
     const searched = normalize(searchedMobile);
+
     CURRENT_QUERY = queryForPdf || "";
 
     const printHeader = `
@@ -415,9 +442,11 @@
 
     resultsEl.innerHTML = printHeader + list.map((r, i) => {
       const isPrimary = searched && normalize(r.mobile) === searched;
+
       let networkCell = "";
       if (r.network_image) {
-        networkCell += `<img class="network-logo" src="${escapeHtml(r.network_image)}"
+        networkCell += `<img class="network-logo"
+                            src="${escapeHtml(r.network_image)}"
                             alt="${escapeHtml(r.network || 'network')}"
                             onerror="this.style.display='none'" />`;
       }
@@ -426,6 +455,7 @@
       } else if (!r.network_image) {
         networkCell = "<span>—</span>";
       }
+
       return `
         <div class="card${isPrimary ? " primary" : ""}">
           <div class="row"><div class="label">#</div><div class="value">${i + 1}${isPrimary ? ' <span class="badge badge-auto">MATCH</span>' : ""}</div></div>
@@ -441,6 +471,9 @@
     showToolbar(true);
   }
 
+  // -------------------------------------------------------------------------
+  //  Quota fetch
+  // -------------------------------------------------------------------------
   async function refreshQuota() {
     try {
       const r = await fetch("/api/quota", {
@@ -451,20 +484,72 @@
       if (!r.ok) return;
       const q = await r.json();
       if (q.success) setQuota(q);
-    } catch { }
+    } catch { /* ignore */ }
   }
 
   refreshQuota();
 
-  // Logout
+  // -------------------------------------------------------------------------
+  //  Check session — show admin link if admin, else redirect if 401
+  // -------------------------------------------------------------------------
+  (async function checkSession() {
+    try {
+      const r = await fetch("/api/session", { credentials: "include" });
+      if (r.status === 401) {
+        window.location.href = "/login";
+        return;
+      }
+      const d = await r.json();
+      if (d.success && d.is_admin) {
+        adminLink.style.display = "inline-block";
+      }
+    } catch { /* ignore */ }
+  })();
+
+  // -------------------------------------------------------------------------
+  //  Logout
+  // -------------------------------------------------------------------------
   logoutBtn.addEventListener("click", async () => {
     try {
       await fetch("/api/logout", { method: "POST", credentials: "include" });
-    } catch {}
+    } catch { /* ignore */ }
     window.location.href = "/login";
   });
 
-  // Search
+  // -------------------------------------------------------------------------
+  //  Change own password
+  // -------------------------------------------------------------------------
+  changePwBtn.addEventListener("click", async () => {
+    const oldPw = prompt("Enter your CURRENT password:");
+    if (!oldPw) return;
+    const newPw = prompt("Enter your NEW password (min 6 chars):");
+    if (!newPw) return;
+    if (newPw.length < 6) {
+      alert("New password must be at least 6 characters.");
+      return;
+    }
+    try {
+      const r = await fetch("/api/me/password", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ old_password: oldPw, new_password: newPw })
+      });
+      const d = await r.json();
+      if (d.success) {
+        alert("Password changed. Please log in again.");
+        window.location.href = "/login";
+      } else {
+        alert(d.error || "Failed to change password.");
+      }
+    } catch {
+      alert("Network error.");
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  //  Search
+  // -------------------------------------------------------------------------
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     const raw = input.value.trim();
@@ -517,6 +602,11 @@
         return;
       }
 
+      if (res.status === 403) {
+        setStatus(escapeHtml(data.error || "Access denied."), "error");
+        return;
+      }
+
       if (!res.ok || !data.success) {
         setStatus(escapeHtml(data.error || `Request failed (${res.status})`), "error");
         return;
@@ -562,6 +652,9 @@
     input.value = input.value.replace(/[^\d+\-\s]/g, "");
   });
 
+  // -------------------------------------------------------------------------
+  //  Save as PDF
+  // -------------------------------------------------------------------------
   downloadBtn.addEventListener("click", () => {
     const originalTitle = document.title;
     const safeQuery = CURRENT_QUERY.replace(/[^\w\-]/g, "_") || "results";
