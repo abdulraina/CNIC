@@ -12,6 +12,7 @@ from functools import wraps
 
 from flask import Flask, request, jsonify, render_template, make_response, redirect
 from flask_cors import CORS
+from werkzeug.middleware.proxy_fix import ProxyFix
 import requests
 from bs4 import BeautifulSoup
 
@@ -19,7 +20,7 @@ from bs4 import BeautifulSoup
 # Config
 # ---------------------------------------------------------------------------
 
-ALLOWED_ORIGIN   = os.environ.get("ALLOWED_ORIGIN", "https://rainaxsimdbpk.onrender.com")
+ALLOWED_ORIGIN   = os.environ.get("ALLOWED_ORIGIN", "")
 SEARCH_LIMIT     = int(os.environ.get("SEARCH_LIMIT", "10"))
 WINDOW_SECONDS   = int(os.environ.get("WINDOW_SECONDS", "3600"))
 MAX_BODY_BYTES   = int(os.environ.get("MAX_BODY_BYTES", "4096"))
@@ -27,14 +28,14 @@ STORE_PATH       = Path(os.environ.get("STORE_PATH", "/tmp/ratelimit_store.json"
 COOKIE_NAME      = "rnx_did"
 COOKIE_MAX_AGE   = 60 * 60 * 24 * 365   # 1 year
 
-# --- Authentication config -------------------------------------------------
+# --- Authentication ---------------------------------------------------------
 ADMIN_USERNAME   = os.environ.get("ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD   = os.environ.get("ADMIN_PASSWORD", "ChangeMeNow!123")
 SESSION_SECRET   = os.environ.get("SESSION_SECRET", secrets.token_hex(32))
 SESSION_COOKIE   = "rnx_session"
-SESSION_MAX_AGE  = int(os.environ.get("SESSION_MAX_AGE", str(60 * 60 * 8)))  # 8 hours
-LOGIN_MAX_ATTEMPTS = int(os.environ.get("LOGIN_MAX_ATTEMPTS", "5"))
-LOGIN_WINDOW_SECONDS = int(os.environ.get("LOGIN_WINDOW_SECONDS", "300"))  # 5 minutes
+SESSION_MAX_AGE  = int(os.environ.get("SESSION_MAX_AGE", str(60 * 60 * 8)))
+LOGIN_MAX_ATTEMPTS   = int(os.environ.get("LOGIN_MAX_ATTEMPTS", "5"))
+LOGIN_WINDOW_SECONDS = int(os.environ.get("LOGIN_WINDOW_SECONDS", "300"))
 
 BASE_URL  = "https://freshsimtracker.com/numberDetails.php"
 BASE_SITE = "https://freshsimtracker.com"
@@ -56,11 +57,12 @@ log = logging.getLogger("simtracker")
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = MAX_BODY_BYTES
 app.config["SECRET_KEY"] = SESSION_SECRET
+app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1, x_for=1)
 
 CORS(
     app,
     resources={r"/api/*": {
-        "origins": [ALLOWED_ORIGIN],
+        "origins": "*" if not ALLOWED_ORIGIN else [ALLOWED_ORIGIN],
         "allow_headers": ["Content-Type", "X-Fingerprint", "X-CSRF-Token", "X-Requested-With"],
         "methods": ["POST", "GET", "OPTIONS"],
         "supports_credentials": True,
@@ -69,25 +71,65 @@ CORS(
 
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _client_ip() -> str:
+    xff = request.headers.get("X-Forwarded-For", "")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.remote_addr or "0.0.0.0"
+
+
+def _is_https() -> bool:
+    return (request.headers.get("X-Forwarded-Proto", "http").lower() == "https"
+            or request.is_secure)
+
+
+def _origin_ok() -> bool:
+    """Permissive origin check — allows same-host, configured origin, and localhost."""
+    if not ALLOWED_ORIGIN:
+        return True
+
+    origin  = (request.headers.get("Origin")  or "").rstrip("/")
+    referer = (request.headers.get("Referer") or "").rstrip("/")
+
+    allowed = ALLOWED_ORIGIN.rstrip("/")
+    if origin == allowed or referer.startswith(allowed):
+        return True
+
+    host = (request.host_url or "").rstrip("/")
+    if host and (origin == host or referer.startswith(host)):
+        return True
+
+    # Allow localhost for dev
+    if origin.startswith("http://localhost") or origin.startswith("http://127.0.0.1"):
+        return True
+    if referer.startswith("http://localhost") or referer.startswith("http://127.0.0.1"):
+        return True
+
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Security headers
 # ---------------------------------------------------------------------------
 
 @app.after_request
 def _add_security_headers(resp):
-    resp.headers["X-Frame-Options"]            = "DENY"
+    resp.headers["X-Frame-Options"]            = "SAMEORIGIN"
     resp.headers["X-Content-Type-Options"]     = "nosniff"
     resp.headers["Referrer-Policy"]            = "no-referrer"
     resp.headers["Permissions-Policy"]         = "geolocation=(), microphone=(), camera=()"
-    resp.headers["Cross-Origin-Opener-Policy"] = "same-origin"
     return resp
 
 
 # ---------------------------------------------------------------------------
-# Session store (in-memory; swap for Redis/DB in production)
+# Session store (in-memory)
 # ---------------------------------------------------------------------------
 
 _sessions_lock = threading.Lock()
-_sessions = {}   # token -> {username, expires, ip, ua}
+_sessions = {}
 
 
 def _create_session(username: str) -> str:
@@ -131,12 +173,10 @@ def _cleanup_sessions():
 
 
 def _current_user():
-    token = request.cookies.get(SESSION_COOKIE)
-    s = _get_session(token)
-    return s["username"] if s else None
+    return (_get_session(request.cookies.get(SESSION_COOKIE)) or {}).get("username")
 
 
-def _require_auth():
+def _require_auth() -> bool:
     return _current_user() is not None
 
 
@@ -145,37 +185,34 @@ def login_required(f):
     def wrapper(*args, **kwargs):
         if not _require_auth():
             if request.path.startswith("/api/"):
-                return jsonify({"success": False, "error": "Unauthorized. Please log in."}), 401
+                return jsonify({"success": False, "error": "Unauthorized."}), 401
             return redirect("/login")
         return f(*args, **kwargs)
     return wrapper
 
 
 # ---------------------------------------------------------------------------
-# Login rate limiting (per IP+username)
+# Login rate-limit
 # ---------------------------------------------------------------------------
 
 _login_attempts_lock = threading.Lock()
-_login_attempts = {}   # key -> {"count", "start", "locked_until"}
+_login_attempts = {}
 
 
 def _login_key(username: str) -> str:
-    ip = _client_ip()
-    return hashlib.sha256(f"{ip}|{username.lower()}".encode()).hexdigest()[:32]
+    return hashlib.sha256(f"{_client_ip()}|{username.lower()}".encode()).hexdigest()[:32]
 
 
 def _check_login_lock(username: str):
-    """Return (locked, seconds_remaining)."""
     key = _login_key(username)
     now = time.time()
     with _login_attempts_lock:
-        entry = _login_attempts.get(key)
-        if not entry:
+        e = _login_attempts.get(key)
+        if not e:
             return False, 0
-        if entry.get("locked_until", 0) > now:
-            return True, int(entry["locked_until"] - now)
-        # reset if window expired
-        if now - entry.get("start", 0) >= LOGIN_WINDOW_SECONDS:
+        if e.get("locked_until", 0) > now:
+            return True, int(e["locked_until"] - now)
+        if now - e.get("start", 0) >= LOGIN_WINDOW_SECONDS:
             _login_attempts.pop(key, None)
         return False, 0
 
@@ -184,42 +221,24 @@ def _record_login_failure(username: str):
     key = _login_key(username)
     now = time.time()
     with _login_attempts_lock:
-        entry = _login_attempts.get(key)
-        if not entry or now - entry.get("start", 0) >= LOGIN_WINDOW_SECONDS:
-            entry = {"start": now, "count": 0, "locked_until": 0}
-            _login_attempts[key] = entry
-        entry["count"] += 1
-        if entry["count"] >= LOGIN_MAX_ATTEMPTS:
-            entry["locked_until"] = now + LOGIN_WINDOW_SECONDS
+        e = _login_attempts.get(key)
+        if not e or now - e.get("start", 0) >= LOGIN_WINDOW_SECONDS:
+            e = {"start": now, "count": 0, "locked_until": 0}
+            _login_attempts[key] = e
+        e["count"] += 1
+        if e["count"] >= LOGIN_MAX_ATTEMPTS:
+            e["locked_until"] = now + LOGIN_WINDOW_SECONDS
 
 
 def _clear_login_failures(username: str):
-    key = _login_key(username)
     with _login_attempts_lock:
-        _login_attempts.pop(key, None)
+        _login_attempts.pop(_login_key(username), None)
 
 
 # ---------------------------------------------------------------------------
-# Origin guard
+# API guard
 # ---------------------------------------------------------------------------
 
-def _origin_ok() -> bool:
-    origin  = (request.headers.get("Origin")  or "").rstrip("/")
-    referer = (request.headers.get("Referer") or "").rstrip("/")
-
-    if origin == ALLOWED_ORIGIN.rstrip("/"):
-        return True
-    if referer.startswith(ALLOWED_ORIGIN.rstrip("/")):
-        return True
-
-    host = (request.host_url or "").rstrip("/")
-    if host and (origin == host or referer.startswith(host)):
-        return True
-
-    return False
-
-
-# Public endpoints that do NOT require auth
 _PUBLIC_API_PATHS = {"/api/login", "/api/logout", "/api/health", "/api/session"}
 
 
@@ -238,7 +257,6 @@ def _guard_api():
                     _client_ip())
         return jsonify({"success": False, "error": "Forbidden origin."}), 403
 
-    # Require auth for everything except the whitelist
     if request.path not in _PUBLIC_API_PATHS:
         if not _require_auth():
             return jsonify({"success": False, "error": "Unauthorized. Please log in."}), 401
@@ -247,14 +265,13 @@ def _guard_api():
 
 
 # ---------------------------------------------------------------------------
-# Persistent device cookie (for search rate limit)
+# Device cookie + Search rate-limit store
 # ---------------------------------------------------------------------------
 
 def _ensure_device_cookie() -> str:
     existing = request.cookies.get(COOKIE_NAME)
     if existing and re.fullmatch(r"[a-f0-9]{32}", existing):
         return existing
-
     new_id = secrets.token_hex(16)
     request.environ["_new_device_cookie"] = new_id
     return new_id
@@ -264,29 +281,17 @@ def _maybe_set_cookie(resp):
     new_id = request.environ.get("_new_device_cookie")
     if new_id:
         resp.set_cookie(
-            COOKIE_NAME,
-            new_id,
+            COOKIE_NAME, new_id,
             max_age=COOKIE_MAX_AGE,
             httponly=True,
-            secure=True,
+            secure=_is_https(),
             samesite="Lax",
             path="/",
         )
 
 
-# ---------------------------------------------------------------------------
-# Store + rate limiting (search)
-# ---------------------------------------------------------------------------
-
 _store_lock = threading.Lock()
 _store_cache = None
-
-
-def _client_ip() -> str:
-    xff = request.headers.get("X-Forwarded-For", "")
-    if xff:
-        return xff.split(",")[0].strip()
-    return request.remote_addr or "0.0.0.0"
 
 
 def _load_store() -> dict:
@@ -321,8 +326,7 @@ def _bucket_keys(cookie_id: str) -> list:
     lang  = (request.headers.get("Accept-Language") or "").strip()[:64]
     fpjs  = (request.headers.get("X-Fingerprint") or "").strip()[:128]
 
-    keys = []
-    keys.append("c:" + hashlib.sha256(cookie_id.encode()).hexdigest()[:24])
+    keys = ["c:" + hashlib.sha256(cookie_id.encode()).hexdigest()[:24]]
     if fpjs:
         keys.append("f:" + hashlib.sha256(fpjs.encode()).hexdigest()[:24])
     keys.append("i:" + hashlib.sha256(f"{ip}|{ua}|{lang}".encode()).hexdigest()[:24])
@@ -338,7 +342,6 @@ def _bucket_keys(cookie_id: str) -> list:
 
 def _check_all_buckets(keys: list):
     now = int(time.time())
-
     with _store_lock:
         store = _load_store()
         worst_remaining = None
@@ -367,7 +370,6 @@ def _check_all_buckets(keys: list):
         for k in keys:
             store[k]["count"] += 1
         _save_store()
-
         return True, max(worst_remaining - 1, 0), worst_reset_in, worst_used + 1
 
 
@@ -497,7 +499,6 @@ def parse_results(html: str):
 
         network_td = cells[4]
         img = network_td.find("img")
-
         network_name = _cell_text(network_td)
         network_logo = ""
         if img:
@@ -588,13 +589,11 @@ def app_page():
 
 @app.route("/")
 def index():
-    if _require_auth():
-        return redirect("/app")
-    return redirect("/login")
+    return redirect("/app" if _require_auth() else "/login")
 
 
 # ---------------------------------------------------------------------------
-# ROUTES — Auth API
+# ROUTES — Auth
 # ---------------------------------------------------------------------------
 
 @app.route("/api/login", methods=["POST"])
@@ -609,35 +608,29 @@ def api_login():
     if len(username) > 64 or len(password) > 256:
         return jsonify({"success": False, "error": "Invalid input."}), 400
 
-    # Check lockout
     locked, secs = _check_login_lock(username)
     if locked:
-        return jsonify({
-            "success": False,
-            "error": f"Too many failed attempts. Try again in {secs}s."
-        }), 429
+        return jsonify({"success": False,
+                        "error": f"Too many failed attempts. Try again in {secs}s."}), 429
 
-    # Constant-time compare
     user_ok = hmac.compare_digest(username, ADMIN_USERNAME)
     pass_ok = hmac.compare_digest(password, ADMIN_PASSWORD)
 
     if not (user_ok and pass_ok):
         _record_login_failure(username)
-        time.sleep(0.6)   # slow brute force
+        time.sleep(0.6)
         log.warning("Failed login user=%r ip=%s", username, _client_ip())
         return jsonify({"success": False, "error": "Invalid username or password."}), 401
 
-    # Success — issue session
     _clear_login_failures(username)
     token = _create_session(username)
 
     resp = make_response(jsonify({"success": True, "redirect": "/app"}))
     resp.set_cookie(
-        SESSION_COOKIE,
-        token,
+        SESSION_COOKIE, token,
         max_age=SESSION_MAX_AGE,
         httponly=True,
-        secure=True,
+        secure=_is_https(),
         samesite="Lax",
         path="/",
     )
@@ -647,14 +640,13 @@ def api_login():
 
 @app.route("/api/logout", methods=["POST"])
 def api_logout():
-    token = request.cookies.get(SESSION_COOKIE)
-    _destroy_session(token)
+    _destroy_session(request.cookies.get(SESSION_COOKIE))
     resp = make_response(jsonify({"success": True}))
     resp.delete_cookie(SESSION_COOKIE, path="/")
     return resp
 
 
-@app.route("/api/session", methods=["GET"])
+@app.route("/api/session")
 def api_session():
     if _require_auth():
         return jsonify({"success": True, "user": _current_user()})
@@ -662,7 +654,7 @@ def api_session():
 
 
 # ---------------------------------------------------------------------------
-# ROUTES — Quota / Search (require auth via _guard_api)
+# ROUTES — Quota / Search
 # ---------------------------------------------------------------------------
 
 @app.route("/api/quota", methods=["GET"])
@@ -703,7 +695,6 @@ def search():
     allowed, remaining, reset_in, used = _check_all_buckets(keys)
 
     if not allowed:
-        log.info("Rate limit hit keys=%s", keys)
         resp = make_response(jsonify({
             "success": False,
             "error": f"Search limit reached ({SEARCH_LIMIT} per hour). "
@@ -765,7 +756,6 @@ def search():
             _maybe_set_cookie(resp)
             return resp
         query_type = "mobile"
-
     else:
         resp = make_response(jsonify({
             "success": False,
@@ -774,10 +764,8 @@ def search():
         _maybe_set_cookie(resp)
         return resp
 
-    if query_type == "mobile":
-        query_display = normalize_mobile_display(query_value)
-    else:
-        query_display = query_value
+    query_display = (normalize_mobile_display(query_value) if query_type == "mobile"
+                     else query_value)
 
     log.info("Upstream lookup user=%s type=%s value=%s",
              _current_user(), query_type, query_value)
@@ -834,9 +822,6 @@ def search():
         _maybe_set_cookie(resp)
         return resp
 
-    log.info("Search ok user=%s type=%s count=%s remaining=%s",
-             _current_user(), query_type, len(final_results), remaining)
-
     resp = make_response(jsonify({
         "success": True,
         "count": len(final_results),
@@ -852,11 +837,11 @@ def search():
 
 @app.route("/api/health")
 def health():
-    return jsonify({"status": "ok"})
+    return jsonify({"status": "ok", "user": _current_user()})
 
 
 # ---------------------------------------------------------------------------
-# Background cleaner
+# Background session cleaner
 # ---------------------------------------------------------------------------
 
 def _session_cleaner():
