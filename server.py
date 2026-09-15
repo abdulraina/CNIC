@@ -3,12 +3,14 @@ import re
 import time
 import json
 import hashlib
+import hmac
 import threading
 import logging
 import secrets
 from pathlib import Path
+from functools import wraps
 
-from flask import Flask, request, jsonify, render_template, make_response
+from flask import Flask, request, jsonify, render_template, make_response, redirect
 from flask_cors import CORS
 import requests
 from bs4 import BeautifulSoup
@@ -24,6 +26,15 @@ MAX_BODY_BYTES   = int(os.environ.get("MAX_BODY_BYTES", "4096"))
 STORE_PATH       = Path(os.environ.get("STORE_PATH", "/tmp/ratelimit_store.json"))
 COOKIE_NAME      = "rnx_did"
 COOKIE_MAX_AGE   = 60 * 60 * 24 * 365   # 1 year
+
+# --- Authentication config -------------------------------------------------
+ADMIN_USERNAME   = os.environ.get("ADMIN_USERNAME", "admin")
+ADMIN_PASSWORD   = os.environ.get("ADMIN_PASSWORD", "ChangeMeNow!123")
+SESSION_SECRET   = os.environ.get("SESSION_SECRET", secrets.token_hex(32))
+SESSION_COOKIE   = "rnx_session"
+SESSION_MAX_AGE  = int(os.environ.get("SESSION_MAX_AGE", str(60 * 60 * 8)))  # 8 hours
+LOGIN_MAX_ATTEMPTS = int(os.environ.get("LOGIN_MAX_ATTEMPTS", "5"))
+LOGIN_WINDOW_SECONDS = int(os.environ.get("LOGIN_WINDOW_SECONDS", "300"))  # 5 minutes
 
 BASE_URL  = "https://freshsimtracker.com/numberDetails.php"
 BASE_SITE = "https://freshsimtracker.com"
@@ -44,12 +55,13 @@ log = logging.getLogger("simtracker")
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = MAX_BODY_BYTES
+app.config["SECRET_KEY"] = SESSION_SECRET
 
 CORS(
     app,
     resources={r"/api/*": {
         "origins": [ALLOWED_ORIGIN],
-        "allow_headers": ["Content-Type", "X-Fingerprint"],
+        "allow_headers": ["Content-Type", "X-Fingerprint", "X-CSRF-Token", "X-Requested-With"],
         "methods": ["POST", "GET", "OPTIONS"],
         "supports_credentials": True,
     }},
@@ -68,6 +80,123 @@ def _add_security_headers(resp):
     resp.headers["Permissions-Policy"]         = "geolocation=(), microphone=(), camera=()"
     resp.headers["Cross-Origin-Opener-Policy"] = "same-origin"
     return resp
+
+
+# ---------------------------------------------------------------------------
+# Session store (in-memory; swap for Redis/DB in production)
+# ---------------------------------------------------------------------------
+
+_sessions_lock = threading.Lock()
+_sessions = {}   # token -> {username, expires, ip, ua}
+
+
+def _create_session(username: str) -> str:
+    token = secrets.token_urlsafe(32)
+    with _sessions_lock:
+        _sessions[token] = {
+            "username": username,
+            "expires":  time.time() + SESSION_MAX_AGE,
+            "ip":       _client_ip(),
+            "ua":       (request.headers.get("User-Agent") or "")[:256],
+        }
+    return token
+
+
+def _get_session(token: str):
+    if not token:
+        return None
+    with _sessions_lock:
+        s = _sessions.get(token)
+        if not s:
+            return None
+        if time.time() > s["expires"]:
+            _sessions.pop(token, None)
+            return None
+        return s
+
+
+def _destroy_session(token: str):
+    if not token:
+        return
+    with _sessions_lock:
+        _sessions.pop(token, None)
+
+
+def _cleanup_sessions():
+    now = time.time()
+    with _sessions_lock:
+        expired = [k for k, v in _sessions.items() if now > v["expires"]]
+        for k in expired:
+            _sessions.pop(k, None)
+
+
+def _current_user():
+    token = request.cookies.get(SESSION_COOKIE)
+    s = _get_session(token)
+    return s["username"] if s else None
+
+
+def _require_auth():
+    return _current_user() is not None
+
+
+def login_required(f):
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        if not _require_auth():
+            if request.path.startswith("/api/"):
+                return jsonify({"success": False, "error": "Unauthorized. Please log in."}), 401
+            return redirect("/login")
+        return f(*args, **kwargs)
+    return wrapper
+
+
+# ---------------------------------------------------------------------------
+# Login rate limiting (per IP+username)
+# ---------------------------------------------------------------------------
+
+_login_attempts_lock = threading.Lock()
+_login_attempts = {}   # key -> {"count", "start", "locked_until"}
+
+
+def _login_key(username: str) -> str:
+    ip = _client_ip()
+    return hashlib.sha256(f"{ip}|{username.lower()}".encode()).hexdigest()[:32]
+
+
+def _check_login_lock(username: str):
+    """Return (locked, seconds_remaining)."""
+    key = _login_key(username)
+    now = time.time()
+    with _login_attempts_lock:
+        entry = _login_attempts.get(key)
+        if not entry:
+            return False, 0
+        if entry.get("locked_until", 0) > now:
+            return True, int(entry["locked_until"] - now)
+        # reset if window expired
+        if now - entry.get("start", 0) >= LOGIN_WINDOW_SECONDS:
+            _login_attempts.pop(key, None)
+        return False, 0
+
+
+def _record_login_failure(username: str):
+    key = _login_key(username)
+    now = time.time()
+    with _login_attempts_lock:
+        entry = _login_attempts.get(key)
+        if not entry or now - entry.get("start", 0) >= LOGIN_WINDOW_SECONDS:
+            entry = {"start": now, "count": 0, "locked_until": 0}
+            _login_attempts[key] = entry
+        entry["count"] += 1
+        if entry["count"] >= LOGIN_MAX_ATTEMPTS:
+            entry["locked_until"] = now + LOGIN_WINDOW_SECONDS
+
+
+def _clear_login_failures(username: str):
+    key = _login_key(username)
+    with _login_attempts_lock:
+        _login_attempts.pop(key, None)
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +219,10 @@ def _origin_ok() -> bool:
     return False
 
 
+# Public endpoints that do NOT require auth
+_PUBLIC_API_PATHS = {"/api/login", "/api/logout", "/api/health", "/api/session"}
+
+
 @app.before_request
 def _guard_api():
     if not request.path.startswith("/api/"):
@@ -105,11 +238,16 @@ def _guard_api():
                     _client_ip())
         return jsonify({"success": False, "error": "Forbidden origin."}), 403
 
+    # Require auth for everything except the whitelist
+    if request.path not in _PUBLIC_API_PATHS:
+        if not _require_auth():
+            return jsonify({"success": False, "error": "Unauthorized. Please log in."}), 401
+
     return None
 
 
 # ---------------------------------------------------------------------------
-# Persistent device cookie
+# Persistent device cookie (for search rate limit)
 # ---------------------------------------------------------------------------
 
 def _ensure_device_cookie() -> str:
@@ -137,7 +275,7 @@ def _maybe_set_cookie(resp):
 
 
 # ---------------------------------------------------------------------------
-# Store + rate limiting
+# Store + rate limiting (search)
 # ---------------------------------------------------------------------------
 
 _store_lock = threading.Lock()
@@ -296,49 +434,24 @@ def _cell_text(td):
 
 # ---------------------------------------------------------------------------
 # Input normalization
-#
-# IMPORTANT: the upstream site expects mobiles in the form 3XXXXXXXXX
-# (10 digits, no leading 0, no +92). We accept anything the user types,
-# then convert before sending upstream.
 # ---------------------------------------------------------------------------
 
 def normalize_cnic(value: str) -> str:
-    """Return 13-digit CNIC (no separators)."""
     return re.sub(r"\D", "", value or "")
 
 
 def normalize_mobile_for_upstream(value: str) -> str:
-    """
-    Return mobile in '3XXXXXXXXX' form (10 digits) as the upstream expects.
-
-    Accepts:
-      03452389277       → 3452389277
-      3452389277        → 3452389277
-      +923452389277     → 3452389277
-      00923452389277    → 3452389277
-      923452389277      → 3452389277
-      92 345 2389277    → 3452389277
-      0345-238-9277     → 3452389277
-    """
     digits = re.sub(r"\D", "", value or "")
-
-    # Strip country code
     if digits.startswith("0092"):
         digits = digits[4:]
     elif digits.startswith("92") and len(digits) >= 12:
         digits = digits[2:]
-
-    # Strip leading 0 (local format)
     if digits.startswith("0"):
         digits = digits[1:]
-
-    return digits   # e.g. "3452389277"
+    return digits
 
 
 def normalize_mobile_display(value: str) -> str:
-    """
-    Return mobile in '03XXXXXXXXX' form for display in error messages.
-    """
     m = normalize_mobile_for_upstream(value)
     if len(m) == 10 and m.startswith("3"):
         return "0" + m
@@ -349,7 +462,6 @@ def is_valid_mobile(value: str) -> bool:
     m = normalize_mobile_for_upstream(value)
     if len(m) != 10 or not m.startswith("3"):
         return False
-    # Pakistani mobile third digit must be 0-4
     return m[1] in "01234"
 
 
@@ -358,22 +470,12 @@ def is_valid_cnic(value: str) -> bool:
 
 
 def detect_input_type(raw: str) -> str:
-    """
-    Return 'cnic' | 'mobile' | 'invalid'.
-    Prefers CNIC only when input has 13 digits and doesn't start with 0/3.
-    """
     digits = re.sub(r"\D", "", raw or "")
-
-    # 13 digits starting with non-zero, non-3 → CNIC
     if len(digits) == 13 and not digits.startswith("0"):
-        # A Pakistani mobile after stripping +92 has 10 digits, so 13 digits
-        # here is definitely a CNIC.
         return "cnic"
-
     m = normalize_mobile_for_upstream(raw)
     if len(m) == 10 and m.startswith("3"):
         return "mobile"
-
     return "invalid"
 
 
@@ -417,11 +519,6 @@ def parse_results(html: str):
 # ---------------------------------------------------------------------------
 
 def _fetch_upstream(query_value: str):
-    """
-    query_value MUST already be normalized:
-      - CNIC → 13 digits
-      - Mobile → 10 digits starting with 3 (no leading 0)
-    """
     resp = requests.post(
         BASE_URL,
         headers=HEADERS,
@@ -470,16 +567,103 @@ def _merge_mobile_then_cnic(mobile_results, cnic_results, searched_mobile):
 
 
 # ---------------------------------------------------------------------------
-# Routes
+# ROUTES — Pages
 # ---------------------------------------------------------------------------
 
-@app.route("/")
-def index():
+@app.route("/login")
+def login_page():
+    if _require_auth():
+        return redirect("/app")
+    return render_template("login.html")
+
+
+@app.route("/app")
+@login_required
+def app_page():
     resp = make_response(render_template("index.html"))
     _ensure_device_cookie()
     _maybe_set_cookie(resp)
     return resp
 
+
+@app.route("/")
+def index():
+    if _require_auth():
+        return redirect("/app")
+    return redirect("/login")
+
+
+# ---------------------------------------------------------------------------
+# ROUTES — Auth API
+# ---------------------------------------------------------------------------
+
+@app.route("/api/login", methods=["POST"])
+def api_login():
+    data = request.get_json(silent=True) or {}
+    username = (data.get("username") or "").strip()
+    password = data.get("password") or ""
+
+    if not username or not password:
+        return jsonify({"success": False, "error": "Missing credentials."}), 400
+
+    if len(username) > 64 or len(password) > 256:
+        return jsonify({"success": False, "error": "Invalid input."}), 400
+
+    # Check lockout
+    locked, secs = _check_login_lock(username)
+    if locked:
+        return jsonify({
+            "success": False,
+            "error": f"Too many failed attempts. Try again in {secs}s."
+        }), 429
+
+    # Constant-time compare
+    user_ok = hmac.compare_digest(username, ADMIN_USERNAME)
+    pass_ok = hmac.compare_digest(password, ADMIN_PASSWORD)
+
+    if not (user_ok and pass_ok):
+        _record_login_failure(username)
+        time.sleep(0.6)   # slow brute force
+        log.warning("Failed login user=%r ip=%s", username, _client_ip())
+        return jsonify({"success": False, "error": "Invalid username or password."}), 401
+
+    # Success — issue session
+    _clear_login_failures(username)
+    token = _create_session(username)
+
+    resp = make_response(jsonify({"success": True, "redirect": "/app"}))
+    resp.set_cookie(
+        SESSION_COOKIE,
+        token,
+        max_age=SESSION_MAX_AGE,
+        httponly=True,
+        secure=True,
+        samesite="Lax",
+        path="/",
+    )
+    log.info("Login OK user=%s ip=%s", username, _client_ip())
+    return resp
+
+
+@app.route("/api/logout", methods=["POST"])
+def api_logout():
+    token = request.cookies.get(SESSION_COOKIE)
+    _destroy_session(token)
+    resp = make_response(jsonify({"success": True}))
+    resp.delete_cookie(SESSION_COOKIE, path="/")
+    return resp
+
+
+@app.route("/api/session", methods=["GET"])
+def api_session():
+    if _require_auth():
+        return jsonify({"success": True, "user": _current_user()})
+    return jsonify({"success": False}), 401
+
+
+# ---------------------------------------------------------------------------
+# ROUTES — Quota / Search (require auth via _guard_api)
+# ---------------------------------------------------------------------------
 
 @app.route("/api/quota", methods=["GET"])
 def quota():
@@ -572,7 +756,6 @@ def search():
         query_type = "cnic"
 
     elif kind == "mobile":
-        # Upstream wants 3XXXXXXXXX (10 digits, no leading 0)
         query_value = normalize_mobile_for_upstream(raw)
         if not is_valid_mobile(query_value):
             resp = make_response(jsonify({
@@ -591,14 +774,13 @@ def search():
         _maybe_set_cookie(resp)
         return resp
 
-    # Display-friendly version for logging / response
     if query_type == "mobile":
-        query_display = normalize_mobile_display(query_value)  # 03XXXXXXXXX
+        query_display = normalize_mobile_display(query_value)
     else:
         query_display = query_value
 
-    log.info("Upstream lookup type=%s value=%s (display=%s)",
-             query_type, query_value, query_display)
+    log.info("Upstream lookup user=%s type=%s value=%s",
+             _current_user(), query_type, query_value)
 
     try:
         first_results = _fetch_upstream(query_value)
@@ -613,7 +795,7 @@ def search():
 
     meta = {
         "query_type": query_type,
-        "upstream_query": query_value,      # what we actually sent (3XXXXXXXXX)
+        "upstream_query": query_value,
         "auto_cnic_lookup": False,
         "auto_cnic": "",
         "first_lookup_count": len(first_results),
@@ -622,7 +804,6 @@ def search():
 
     final_results = first_results
 
-    # Auto second lookup: mobile → CNIC
     if query_type == "mobile" and first_results:
         discovered_cnic = _pick_cnic_from_results(first_results, searched_mobile=query_value)
         if discovered_cnic:
@@ -653,8 +834,8 @@ def search():
         _maybe_set_cookie(resp)
         return resp
 
-    log.info("Search ok type=%s count=%s remaining=%s",
-             query_type, len(final_results), remaining)
+    log.info("Search ok user=%s type=%s count=%s remaining=%s",
+             _current_user(), query_type, len(final_results), remaining)
 
     resp = make_response(jsonify({
         "success": True,
@@ -672,6 +853,22 @@ def search():
 @app.route("/api/health")
 def health():
     return jsonify({"status": "ok"})
+
+
+# ---------------------------------------------------------------------------
+# Background cleaner
+# ---------------------------------------------------------------------------
+
+def _session_cleaner():
+    while True:
+        time.sleep(300)
+        try:
+            _cleanup_sessions()
+        except Exception:
+            pass
+
+
+threading.Thread(target=_session_cleaner, daemon=True).start()
 
 
 if __name__ == "__main__":
